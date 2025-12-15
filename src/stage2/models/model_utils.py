@@ -333,6 +333,7 @@ class NormAttention(nn.Module):
         norm_layer: nn.Module = nn.LayerNorm,
         fused_attn: bool = True,
         use_rmsnorm: bool = False,
+        num_register_tokens: int = 0,
     ) -> None:
         super().__init__()
         assert dim % num_heads == 0, 'dim should be divisible by num_heads'
@@ -341,6 +342,7 @@ class NormAttention(nn.Module):
         self.head_dim = dim // num_heads
         self.scale = self.head_dim ** -0.5
         self.fused_attn = fused_attn
+        self.num_register_tokens = num_register_tokens
         
         if use_rmsnorm:
             norm_layer = RMSNorm
@@ -359,8 +361,17 @@ class NormAttention(nn.Module):
         q, k = self.q_norm(q), self.k_norm(k)
         
         if rope is not None:
-            q = rope(q)
-            k = rope(k)
+            R = self.num_register_tokens
+            if R > 0:
+                q_reg, q_tok = q[:, :, :R], q[:, :, R:]
+                k_reg, k_tok = k[:, :, :R], k[:, :, R:]
+                q_tok = rope(q_tok)
+                k_tok = rope(k_tok)
+                q = torch.cat([q_reg, q_tok], dim=2)
+                k = torch.cat([k_reg, k_tok], dim=2)
+            else:
+                q = rope(q)
+                k = rope(k)
 
         if self.fused_attn:
             q = q.to(v.dtype)

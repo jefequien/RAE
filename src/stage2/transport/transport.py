@@ -200,16 +200,16 @@ class Transport:
         t, xt, ut = self.path_sampler.plan(t, x0, x1)
         model_output = model(xt, t, **model_kwargs)
         B, *_, C = xt.shape
-        assert model_output.size() == (B, *xt.size()[1:-1], C)
+        assert model_output['image'].size() == (B, *xt.size()[1:-1], C)
 
         terms = {}
         terms['t'] = t
         terms['xt'] = xt
-        terms['pred'] = model_output
+        terms['pred'] = model_output['image']
         if self.model_type == ModelType.VELOCITY:
-            terms['loss'] = mean_flat(((model_output - ut) ** 2))
+            terms['loss'] = mean_flat(((terms['pred'] - ut) ** 2))
         elif self.model_type == ModelType.DATA:
-            v_pred = (xt - model_output) / path.expand_t_like_x(t, xt)
+            v_pred = (xt - terms['pred']) / path.expand_t_like_x(t, xt)
             terms['loss'] = mean_flat(((v_pred - ut) ** 2))
         else: 
             _, drift_var = self.path_sampler.compute_drift(xt, t)
@@ -224,9 +224,9 @@ class Transport:
                 raise NotImplementedError()
             
             if self.model_type == ModelType.NOISE:
-                terms['loss'] = mean_flat(weight * ((model_output - x0) ** 2))
+                terms['loss'] = mean_flat(weight * ((terms['pred'] - x0) ** 2))
             else:
-                terms['loss'] = mean_flat(weight * ((model_output * sigma_t + x0) ** 2))
+                terms['loss'] = mean_flat(weight * ((terms['pred'] * sigma_t + x0) ** 2))
                 
         return terms
     
@@ -237,22 +237,22 @@ class Transport:
         """member function for obtaining the drift of the probability flow ODE"""
         def score_ode(x, t, model, **model_kwargs):
             drift_mean, drift_var = self.path_sampler.compute_drift(x, t)
-            model_output = model(x, t, **model_kwargs)
+            model_output = model(x, t, **model_kwargs)['image']
             return (-drift_mean + drift_var * model_output) # by change of variable
         
         def noise_ode(x, t, model, **model_kwargs):
             drift_mean, drift_var = self.path_sampler.compute_drift(x, t)
             sigma_t, _ = self.path_sampler.compute_sigma_t(path.expand_t_like_x(t, x))
-            model_output = model(x, t, **model_kwargs)
+            model_output = model(x, t, **model_kwargs)['image']
             score = model_output / -sigma_t
             return (-drift_mean + drift_var * score)
         
         def velocity_ode(x, t, model, **model_kwargs):
-            model_output = model(x, t, **model_kwargs)
+            model_output = model(x, t, **model_kwargs)['image']
             return model_output
         
         def data_ode(x, t, model, **model_kwargs):
-            model_output = model(x, t, **model_kwargs)
+            model_output = model(x, t, **model_kwargs)['image']
             v_pred = (x - model_output) / path.expand_t_like_x(t, x)
             return v_pred
 
@@ -281,13 +281,13 @@ class Transport:
         """member function for obtaining score of 
             x_t = alpha_t * x + sigma_t * eps"""
         if self.model_type == ModelType.NOISE:
-            score_fn = lambda x, t, model, **kwargs: model(x, t, **kwargs) / -self.path_sampler.compute_sigma_t(path.expand_t_like_x(t, x))[0]
+            score_fn = lambda x, t, model, **kwargs: model(x, t, **kwargs)['image'] / -self.path_sampler.compute_sigma_t(path.expand_t_like_x(t, x))[0]
         elif self.model_type == ModelType.SCORE:
-            score_fn = lambda x, t, model, **kwagrs: model(x, t, **kwagrs)
+            score_fn = lambda x, t, model, **kwargs: model(x, t, **kwargs)['image']
         elif self.model_type == ModelType.VELOCITY:
-            score_fn = lambda x, t, model, **kwargs: self.path_sampler.get_score_from_velocity(model(x, t, **kwargs), x, t)
+            score_fn = lambda x, t, model, **kwargs: self.path_sampler.get_score_from_velocity(model(x, t, **kwargs)['image'], x, t)
         elif self.model_type == ModelType.DATA:
-            score_fn = lambda x, t, model, **kwargs: self.path_sampler.get_score_from_data(model(x, t, **kwargs), x, t)
+            score_fn = lambda x, t, model, **kwargs: self.path_sampler.get_score_from_data(model(x, t, **kwargs)['image'], x, t)
         else:
             raise NotImplementedError()
         

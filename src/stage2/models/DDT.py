@@ -190,6 +190,7 @@ class DiTwDDTHead(nn.Module):
             depth=[28, 2],
             num_heads: Union[list[int], int] = [16, 16],
             mlp_ratio=4.0,
+            num_register_tokens=0,
             class_dropout_prob=0.1,
             num_classes=1000,
             use_qknorm=False,
@@ -211,6 +212,10 @@ class DiTwDDTHead(nn.Module):
         self.num_encoder_blocks = depth[0]
         self.num_blocks = depth[0] + depth[1]
         self.use_rope = use_rope
+        self.num_register_tokens = num_register_tokens
+        if self.num_register_tokens > 0:
+            self.register_tokens = nn.Parameter(torch.randn(num_register_tokens, hidden_size[0]))
+            self.register_head = nn.Linear(hidden_size[1], 1)
         # analyze patch size
         if isinstance(patch_size, int) or isinstance(patch_size, float):
             patch_size = [patch_size, patch_size]  # patch size for s , x embed
@@ -274,6 +279,7 @@ class DiTwDDTHead(nn.Module):
                               use_rmsnorm=use_rmsnorm,
                               use_swiglu=use_swiglu,
                               wo_shift=wo_shift,
+                              num_register_tokens=num_register_tokens,
                               ) for i in range(self.num_blocks)
         ])
         self.initialize_weights()
@@ -345,6 +351,9 @@ class DiTwDDTHead(nn.Module):
             s = self.s_embedder(x)
             if self.use_pos_embed:
                 s = s + self.pos_embed
+            if self.num_register_tokens > 0:
+                reg = self.register_tokens.unsqueeze(0).expand(x.shape[0], -1, -1)  # [B, R, D]
+                s = torch.cat([reg, s], dim=1)  # [B, R + S, D]
             # print(f"t shape: {t.shape}, y shape: {y.shape}, c shape: {c.shape}, s shape: {s.shape}, pos_embed shape: {self.pos_embed.shape}")
             for i in range(self.num_encoder_blocks):
                 s = self.blocks[i](s, c, feat_rope=self.enc_feat_rope)
@@ -355,11 +364,19 @@ class DiTwDDTHead(nn.Module):
         x = self.x_embedder(x)
         if self.use_pos_embed and self.x_pos_embed is not None:
             x = x + self.x_pos_embed
+        if self.num_register_tokens > 0:
+            x = torch.cat([s[:, :self.num_register_tokens, :], x], dim=1)  # [B, R + S, D]
         for i in range(self.num_encoder_blocks, self.num_blocks):
             x = self.blocks[i](x, s, feat_rope=self.dec_feat_rope)
-        x = self.final_layer(x, s)
-        x = self.unpatchify(x)
-        return x
+        
+        image_patches = self.final_layer(x[:, self.num_register_tokens:, :], s[:, self.num_register_tokens:, :])
+        image_out = self.unpatchify(image_patches)
+
+        model_out = {'image': image_out}
+        if self.num_register_tokens > 0:
+            model_out['register_tokens'] = x[:, :self.num_register_tokens, :]
+            model_out['register_logits'] = self.register_head(x[:, :self.num_register_tokens, :])
+        return model_out
 
     def forward_with_cfg(self, x, t, y, cfg_scale, cfg_interval=(0, 1)):
         """
@@ -368,7 +385,7 @@ class DiTwDDTHead(nn.Module):
         # https://github.com/openai/glide-text2im/blob/main/notebooks/text2im.ipynb
         half = x[: len(x) // 2]
         combined = torch.cat([half, half], dim=0)
-        model_out = self.forward(combined, t, y)
+        model_out = self.forward(combined, t, y)['image']
         # For exact reproducibility reasons, we apply classifier-free guidance on only
         # three channels by default. The standard approach to cfg applies it to all channels.
         # This can be done by uncommenting the following line and commenting-out the line following that.
@@ -392,8 +409,8 @@ class DiTwDDTHead(nn.Module):
         """
         Forward pass of LightningDiT, but also contain the forward pass for the additional model
         """
-        model_out = self.forward(x, t, y)
-        ag_model_out = additional_model_forward(x, t, y)
+        model_out = self.forward(x, t, y)['image']
+        ag_model_out = additional_model_forward(x, t, y)['image']
         eps = model_out[:, :self.in_channels]
         ag_eps = ag_model_out[:, :self.in_channels]
 

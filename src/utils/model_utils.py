@@ -30,6 +30,16 @@ def instantiate_from_config(config) -> object:
         elif "model" in state_dict:
             raise NotImplementedError("Loading from 'model' key not implemented yet.")
             state_dict = state_dict["model"]
+        
+        # Remove _orig_mod prefix from state_dict keys. This is a known issue with torch.compile
+        new_state_dict = {}
+        for k, v in state_dict.items():
+            if k.startswith("_orig_mod."):
+                new_state_dict[k[len("_orig_mod."):]] = v
+            else:
+                new_state_dict[k] = v
+        state_dict = new_state_dict
+        
         model.load_state_dict(state_dict, strict=True)
         print(f'target {config["target"]} loaded from {ckpt_path}')
     return model

@@ -474,15 +474,15 @@ def main(args):
 
             if train_steps % sample_every == 0 or train_steps == 1:
                 with torch.no_grad():
-                    # x0_pred = terms['xt'] - expand_t_like_x(terms['t'], terms['xt']) * terms['pred']
+                    # x0_pred = terms['pred']
+                    x0_pred = terms['xt'] - expand_t_like_x(terms['t'], terms['xt']) * terms['pred']
                     wandb_utils.log_image(
                         rae.decode(terms["xt"].to(torch.float32)), 
                         train_steps, 
                         name="samples/xt", 
                     )
                     wandb_utils.log_image(
-                        rae.decode(terms['pred'].to(torch.float32)), 
-                        # rae.decode(x0_pred.to(torch.float32)), 
+                        rae.decode(x0_pred.to(torch.float32)), 
                         train_steps, 
                         name="samples/x0", 
                     )
