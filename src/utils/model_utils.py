@@ -23,6 +23,10 @@ def instantiate_from_config(config) -> object:
         # see if it's a ckpt from training by checking for "model"
         if "ema" in state_dict:
             state_dict = state_dict["ema"]
+        elif "emas" in state_dict:
+            ema_decays = list(state_dict["emas"].keys())
+            print(f"Found {len(ema_decays)} EMA decays: {ema_decays}")
+            state_dict = state_dict["emas"][ema_decays[0]]
         elif "model" in state_dict:
             raise NotImplementedError("Loading from 'model' key not implemented yet.")
             state_dict = state_dict["model"]

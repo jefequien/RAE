@@ -53,25 +53,24 @@ def build_scheduler(
     """
     Create a learning rate scheduler with optional warmup. Supports 'linear' and 'cosine'.
     """
-    sched_cfg: Dict[str, Any] = dict(training_cfg.get("scheduler", {}))
-    schedule_type = sched_cfg.get("type", "linear").lower()
+    schedule_type = training_cfg.get("schedule_type", "linear").lower()
 
-    base_lr = float(sched_cfg.get("base_lr", training_cfg.get("base_lr", optimizer.param_groups[0]["lr"])))
-    final_lr = float(sched_cfg.get("final_lr", training_cfg.get("final_lr", base_lr)))
+    base_lr = float(training_cfg.get("base_lr", optimizer.param_groups[0]["lr"]))
+    final_lr = float(training_cfg.get("final_lr", base_lr))
     final_ratio = final_lr / base_lr if base_lr > 0 else 1.0
 
-    warmup_steps_cfg = sched_cfg.get("warmup_steps")
+    warmup_steps_cfg = training_cfg.get("warmup_steps")
     if warmup_steps_cfg is not None:
         warmup_steps = int(warmup_steps_cfg)
     else:
-        warmup_epochs = float(sched_cfg.get("warmup_epochs", training_cfg.get("decay_start_epoch", 0)))
+        warmup_epochs = float(training_cfg.get("warmup_epochs", training_cfg.get("decay_start_epoch", 0)))
         warmup_steps = int(warmup_epochs * steps_per_epoch)
 
-    decay_end_steps_cfg = sched_cfg.get("decay_end_steps")
+    decay_end_steps_cfg = training_cfg.get("decay_end_steps")
     if decay_end_steps_cfg is not None:
         decay_end_steps = int(decay_end_steps_cfg)
     else:
-        decay_end_epoch = float(sched_cfg.get("decay_end_epoch", training_cfg.get("decay_end_epoch", warmup_steps / steps_per_epoch if steps_per_epoch else 0)))
+        decay_end_epoch = float(training_cfg.get("decay_end_epoch", training_cfg.get("decay_end_epoch", warmup_steps / steps_per_epoch if steps_per_epoch else 0)))
         decay_end_steps = int(decay_end_epoch * steps_per_epoch)
 
     warmup_steps = max(warmup_steps, 0)
@@ -101,8 +100,14 @@ def build_scheduler(
             progress = (step - warmup_steps) / total_decay_steps
             cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
             return final_ratio + (1.0 - final_ratio) * cosine
+    elif schedule_type == "constant":
+
+        def lr_lambda(step: int) -> float:
+            if step < warmup_steps:
+                return (step + 1) / warmup_steps
+            return 1.0
     else:
-        raise ValueError(f"Unsupported scheduler '{schedule_type}'. Choose from ['linear', 'cosine'].")
+        raise ValueError(f"Unsupported scheduler '{schedule_type}'. Choose from ['linear', 'cosine', 'constant'].")
     scheduler = LambdaLR(optimizer, lr_lambda=lr_lambda)
     if state_dict is not None:
         scheduler.load_state_dict(state_dict)

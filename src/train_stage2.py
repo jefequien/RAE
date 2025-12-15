@@ -19,7 +19,7 @@ import numpy as np
 from collections import OrderedDict
 from PIL import Image
 from copy import deepcopy
-from glob import glob
+from datetime import datetime
 from time import time
 import argparse
 import logging
@@ -30,6 +30,7 @@ from omegaconf import OmegaConf
 from stage1 import RAE
 from stage2.models import Stage2ModelProtocol
 from stage2.transport import create_transport, Sampler
+from stage2.transport.path import expand_t_like_x
 from utils.train_utils import parse_configs
 from utils.model_utils import instantiate_from_config
 from utils import wandb_utils
@@ -41,16 +42,21 @@ from utils.optim_utils import build_optimizer, build_scheduler
 #################################################################################
 
 @torch.no_grad()
-def update_ema(ema_model, model, decay=0.9999):
+def update_ema(ema_models, model, decays=(0.9999,)):
     """
     Step the EMA model towards the current model.
     """
-    ema_params = OrderedDict(ema_model.named_parameters())
-    model_params = OrderedDict(model.named_parameters())
+    # model_params = OrderedDict(model.named_parameters())
+    # for ema_model, decay in zip(ema_models, decays):
+    #     ema_params = OrderedDict(ema_model.named_parameters())
+    #     for name, param in model_params.items():
+    #         # TODO: Consider applying only to params that require_grad to avoid small numerical changes of pos_embed
+    #         ema_params[name].mul_(decay).add_(param.data, alpha=1 - decay)
 
-    for name, param in model_params.items():
-        # TODO: Consider applying only to params that require_grad to avoid small numerical changes of pos_embed
-        ema_params[name].mul_(decay).add_(param.data, alpha=1 - decay)
+    for ema_model, decay in zip(ema_models, decays):
+        for ema_param, param in zip(ema_model.parameters(), model.parameters()):
+            # In-place EMA update with detached param to avoid gradient tracking
+            ema_param.mul_(decay).add_(param.detach(), alpha=1 - decay)
 
 
 def requires_grad(model, flag=True):
@@ -148,9 +154,9 @@ def main(args):
     shift_base = misc.get("time_dist_shift_base", 4096)
     time_dist_shift = math.sqrt(shift_dim / shift_base)
 
-    grad_accum_steps = int(training_cfg.get("grad_accum_steps", 1))
+    micro_batch_size = int(training_cfg.get("micro_batch_size", 1))
     clip_grad = float(training_cfg.get("clip_grad", 1.0))
-    ema_decay = float(training_cfg.get("ema_decay", 0.9995))
+    ema_decays = tuple(training_cfg.get("ema_decays", (0.9995,)))
     epochs = int(training_cfg.get("epochs", 1400))
     global_batch_size = int(training_cfg.get("global_batch_size", 1024))
     num_workers = int(training_cfg.get("num_workers", 4))
@@ -160,16 +166,21 @@ def main(args):
     cfg_scale_override = training_cfg.get("cfg_scale", None)
     default_seed = int(training_cfg.get("global_seed", 0))
     global_seed = args.global_seed if args.global_seed is not None else default_seed
+    global_batch_size = args.global_batch_size if args.global_batch_size is not None else global_batch_size
+    micro_batch_size = args.micro_batch_size if args.micro_batch_size is not None else micro_batch_size
+    log_every = args.log_every if args.log_every is not None else log_every
+    ckpt_every = args.ckpt_every if args.ckpt_every is not None else ckpt_every
+    sample_every = args.sample_every if args.sample_every is not None else sample_every
 
-    if grad_accum_steps < 1:
-        raise ValueError("Gradient accumulation steps must be >= 1.")
+    if micro_batch_size < 1:
+        raise ValueError("Micro batch size must be >= 1.")
     if args.image_size % 16 != 0:
         raise ValueError("Image size must be divisible by 16 for the RAE encoder.")
 
     dist.init_process_group("nccl")
     world_size = dist.get_world_size()
-    if global_batch_size % (world_size * grad_accum_steps) != 0:
-        raise ValueError("Global batch size must be divisible by world_size * grad_accum_steps.")
+    if global_batch_size % (world_size * micro_batch_size) != 0:
+        raise ValueError("Global batch size must be divisible by world_size * micro_batch_size.")
     rank = dist.get_rank()
     device_idx = rank % torch.cuda.device_count()
     torch.cuda.set_device(device_idx)
@@ -181,7 +192,7 @@ def main(args):
     if rank == 0:
         print(f"Starting rank={rank}, seed={seed}, world_size={world_size}.")
 
-    micro_batch_size = global_batch_size // (world_size * grad_accum_steps)
+    grad_accum_steps = global_batch_size // (world_size * micro_batch_size)
     use_bf16 = args.precision == "bf16"
     if use_bf16 and not torch.cuda.is_bf16_supported():
         raise ValueError("Requested bf16 precision, but the current CUDA device does not support bfloat16.")
@@ -213,13 +224,13 @@ def main(args):
 
     if rank == 0:
         os.makedirs(args.results_dir, exist_ok=True)
-        experiment_index = len(glob(f"{args.results_dir}/*")) - 1
+        experiment_index = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
         model_target = str(model_config.get("target", "stage2"))
         model_string_name = model_target.split(".")[-1]
         precision_suffix = f"-{args.precision}" if args.precision == "bf16" else ""
         loss_weight_str = loss_weight if loss_weight is not None else "none"
         experiment_name = (
-            f"{experiment_index:03d}-{model_string_name}-"
+            f"{experiment_index}-{model_string_name}-"
             f"{path_type}-{prediction}-{loss_weight_str}{precision_suffix}-acc{grad_accum_steps}"
         )
         experiment_dir = os.path.join(args.results_dir, experiment_name)
@@ -231,6 +242,7 @@ def main(args):
             entity = os.environ["ENTITY"]
             project = os.environ["PROJECT"]
             wandb_utils.initialize(args, entity, experiment_name, project)
+            wandb_utils.log_artifact(args.config, "full_config", "config")
     else:
         experiment_dir = None
         checkpoint_dir = None
@@ -240,8 +252,14 @@ def main(args):
     rae.eval()
 
     model: Stage2ModelProtocol = instantiate_from_config(model_config).to(device)
-    ema = deepcopy(model).to(device)
-    requires_grad(ema, False)
+    model = torch.compile(
+        model,
+        mode="reduce-overhead",
+        dynamic=False,           # important: diffusion uses fixed shapes
+    )
+    emas = [deepcopy(model).to(device) for _ in range(len(ema_decays))]
+    for ema in emas:
+        requires_grad(ema, False)
 
     opt_state = None
     sched_state = None
@@ -251,8 +269,13 @@ def main(args):
         checkpoint = torch.load(args.ckpt, map_location="cpu")
         if "model" in checkpoint:
             model.load_state_dict(checkpoint["model"])
-        if "ema" in checkpoint:
-            ema.load_state_dict(checkpoint["ema"])
+        if "emas" in checkpoint:
+            for ema_decay, ema in zip(ema_decays, emas):
+                print(f"Loading EMA decay {ema_decay} from checkpoint...")
+                if ema_decay in checkpoint["emas"]:
+                    ema.load_state_dict(checkpoint["emas"][ema_decay])
+                else:
+                    raise ValueError(f"EMA decay {ema_decay} not found in checkpoint.")
         opt_state = checkpoint.get("opt")
         sched_state = checkpoint.get("scheduler")
         train_steps = int(checkpoint.get("train_steps", 0))
@@ -327,9 +350,10 @@ def main(args):
         guid_model.eval()
         guid_model_forward = guid_model.forward
 
-    update_ema(ema, model.module, decay=0)
+    update_ema(emas, model.module, decays=[0] * len(emas))
     model.train()
-    ema.eval()
+    for ema in emas:
+        ema.eval()
 
     log_steps = 0
     running_loss = 0.0
@@ -353,12 +377,12 @@ def main(args):
             if guid_model_forward is None:
                 raise RuntimeError("Guidance model forward is not initialized.")
             sample_model_kwargs["additional_model_forward"] = guid_model_forward
-            model_fn = ema.forward_with_autoguidance
+            model_fn = emas[0].forward_with_autoguidance
         else:
-            model_fn = ema.forward_with_cfg
+            model_fn = emas[0].forward_with_cfg
     else:
         sample_model_kwargs = dict(y=ys)
-        model_fn = ema.forward
+        model_fn = emas[0].forward
 
     logger.info(f"Training for {epochs} epochs...")
     for epoch in range(epochs):
@@ -374,7 +398,11 @@ def main(args):
                 x = rae.encode(x)
             model_kwargs = dict(y=y)
             with autocast(**autocast_kwargs):
-                loss_tensor = transport.training_losses(model, x, model_kwargs)["loss"].mean()
+                terms = transport.training_losses(model, x, model_kwargs)
+                raw_loss = terms["loss"]
+                safe_loss = torch.nan_to_num(raw_loss, nan=0.0, posinf=0.0, neginf=0.0)
+                safe_loss = torch.clamp(safe_loss, min=0.0, max=10.0)
+                loss_tensor = safe_loss.mean()
             step_loss_accum += loss_tensor.item()
             (loss_tensor / grad_accum_steps).backward()
             accum_counter += 1
@@ -383,10 +411,10 @@ def main(args):
                 continue
 
             if clip_grad > 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), clip_grad)
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), clip_grad)
             opt.step()
             schedl.step()
-            update_ema(ema, model.module, decay=ema_decay)
+            update_ema(emas, model.module, decays=ema_decays)
             opt.zero_grad()
 
             running_loss += step_loss_accum / grad_accum_steps
@@ -404,10 +432,16 @@ def main(args):
                 avg_loss = avg_loss.item() / world_size
                 logger.info(f"(step={train_steps:07d}) Train Loss: {avg_loss:.4f}, Train Steps/Sec: {steps_per_sec:.2f}")
                 if args.wandb:
-                    wandb_utils.log(
-                        {"train loss": avg_loss, "train steps/sec": steps_per_sec},
-                        step=train_steps,
-                    )
+                    log_dict = {
+                        "train loss": avg_loss,
+                        "train steps/sec": steps_per_sec,
+                        "learning rate": opt.param_groups[0]["lr"],
+                        "epoch": epoch,
+                        "train steps": train_steps,
+                    }
+                    if clip_grad > 0:
+                        log_dict["grad norm"] = grad_norm
+                    wandb_utils.log(log_dict, step=train_steps)
                 running_loss = 0.0
                 log_steps = 0
                 start_time = time()
@@ -416,7 +450,7 @@ def main(args):
                 if rank == 0:
                     checkpoint = {
                         "model": model.module.state_dict(),
-                        "ema": ema.state_dict(),
+                        "emas": {ema_decay: ema.state_dict() for ema_decay, ema in zip(ema_decays, emas)},
                         "opt": opt.state_dict(),
                         "scheduler": schedl.state_dict(),
                         "train_steps": train_steps,
@@ -433,9 +467,26 @@ def main(args):
                     checkpoint_path = f"{checkpoint_dir}/{train_steps:07d}.pt"
                     torch.save(checkpoint, checkpoint_path)
                     logger.info(f"Saved checkpoint to {checkpoint_path}")
+                    checkpoint_paths = sorted(os.listdir(checkpoint_dir))
+                    if len(checkpoint_paths) > args.num_ckpts:
+                        os.remove(os.path.join(checkpoint_dir, checkpoint_paths[0]))
                 dist.barrier()
 
             if train_steps % sample_every == 0 or train_steps == 1:
+                with torch.no_grad():
+                    # x0_pred = terms['xt'] - expand_t_like_x(terms['t'], terms['xt']) * terms['pred']
+                    wandb_utils.log_image(
+                        rae.decode(terms["xt"].to(torch.float32)), 
+                        train_steps, 
+                        name="samples/xt", 
+                    )
+                    wandb_utils.log_image(
+                        rae.decode(terms['pred'].to(torch.float32)), 
+                        # rae.decode(x0_pred.to(torch.float32)), 
+                        train_steps, 
+                        name="samples/x0", 
+                    )
+
                 logger.info("Generating EMA samples...")
                 with torch.no_grad():
                     with autocast(**autocast_kwargs):
@@ -451,7 +502,7 @@ def main(args):
                     )
                     dist.all_gather_into_tensor(out_samples, samples)
                     if args.wandb:
-                        wandb_utils.log_image(out_samples, train_steps)
+                        wandb_utils.log_image(out_samples[:micro_batch_size], train_steps, name="samples/prediction")
                 logger.info("Generating EMA samples done.")
 
         if accum_counter != 0:
@@ -472,6 +523,12 @@ if __name__ == "__main__":
     parser.add_argument("--precision", type=str, choices=["fp32", "bf16"], default="fp32", help="Compute precision for training.")
     parser.add_argument("--wandb", action="store_true", help="Enable Weights & Biases logging.")
     parser.add_argument("--ckpt", type=str, default=None, help="Optional checkpoint path to resume training.")
+    parser.add_argument("--num_ckpts", type=int, default=2, help="Number of checkpoints to save.")
     parser.add_argument("--global-seed", type=int, default=None, help="Override training.global_seed from the config.")
+    parser.add_argument("--global-batch-size", type=int, default=None, help="Override training.global_batch_size from the config.")
+    parser.add_argument("--micro-batch-size", type=int, default=None, help="Override training.micro_batch_size from the config.")
+    parser.add_argument("--log-every", type=int, default=None, help="Override training.log_every from the config.")
+    parser.add_argument("--ckpt-every", type=int, default=None, help="Override training.ckpt_every from the config.")
+    parser.add_argument("--sample-every", type=int, default=None, help="Override training.sample_every from the config.")
     args = parser.parse_args()
     main(args)

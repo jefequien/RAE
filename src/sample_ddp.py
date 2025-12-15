@@ -58,7 +58,6 @@ def build_label_sampler(
     rank: int,
     iterations: int,
     seed: int,
-    label_counts_path: Optional[str],
 ) -> Callable[[int], torch.Tensor]:
     """Create a callable that returns a batch of labels for the given step index."""
 

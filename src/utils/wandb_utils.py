@@ -37,19 +37,26 @@ def initialize(args, entity, exp_name, project_name):
     )
 
 
+def log_artifact(config_path, artifact_name, artifact_type):
+    artifact = wandb.Artifact(artifact_name, type=artifact_type)
+    artifact.add_file(config_path)
+    wandb.log_artifact(artifact)
+
+
 def log(stats, step=None):
     if is_main_process():
         wandb.log({k: v for k, v in stats.items()}, step=step)
 
 
-def log_image(sample, step=None):
+def log_image(sample, step=None, name="samples", nrow=None):
     if is_main_process():
-        sample = array2grid(sample)
-        wandb.log({f"samples": wandb.Image(sample), "train_step": step})
+        sample = array2grid(sample, nrow=nrow)
+        wandb.log({name: wandb.Image(sample), "train_step": step})
 
 
-def array2grid(x):
-    nrow = round(math.sqrt(x.size(0)))
+def array2grid(x, nrow=None):
+    if nrow is None:
+        nrow = round(math.sqrt(x.size(0)))
     x = make_grid(x, nrow=nrow, normalize=True, value_range=(0,1))
     x = x.clamp(0, 1).mul(255).permute(1,2,0).to('cpu', torch.uint8).numpy()
     return x

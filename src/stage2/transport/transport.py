@@ -16,6 +16,7 @@ class ModelType(enum.Enum):
     NOISE = enum.auto()  # the model predicts epsilon
     SCORE = enum.auto()  # the model predicts \nabla \log p(x)
     VELOCITY = enum.auto()  # the model predicts v(x)
+    DATA = enum.auto()  # the model predicts x_0
 
 class PathType(enum.Enum):
     """
@@ -202,9 +203,14 @@ class Transport:
         assert model_output.size() == (B, *xt.size()[1:-1], C)
 
         terms = {}
+        terms['t'] = t
+        terms['xt'] = xt
         terms['pred'] = model_output
         if self.model_type == ModelType.VELOCITY:
             terms['loss'] = mean_flat(((model_output - ut) ** 2))
+        elif self.model_type == ModelType.DATA:
+            v_pred = (xt - model_output) / path.expand_t_like_x(t, xt)
+            terms['loss'] = mean_flat(((v_pred - ut) ** 2))
         else: 
             _, drift_var = self.path_sampler.compute_drift(xt, t)
             sigma_t, _ = self.path_sampler.compute_sigma_t(path.expand_t_like_x(t, xt))
@@ -244,13 +250,22 @@ class Transport:
         def velocity_ode(x, t, model, **model_kwargs):
             model_output = model(x, t, **model_kwargs)
             return model_output
+        
+        def data_ode(x, t, model, **model_kwargs):
+            model_output = model(x, t, **model_kwargs)
+            v_pred = (x - model_output) / path.expand_t_like_x(t, x)
+            return v_pred
 
         if self.model_type == ModelType.NOISE:
             drift_fn = noise_ode
         elif self.model_type == ModelType.SCORE:
             drift_fn = score_ode
-        else:
+        elif self.model_type == ModelType.VELOCITY:
             drift_fn = velocity_ode
+        elif self.model_type == ModelType.DATA:
+            drift_fn = data_ode
+        else:
+            raise NotImplementedError()
         
         def body_fn(x, t, model, **model_kwargs):
             model_output = drift_fn(x, t, model, **model_kwargs)

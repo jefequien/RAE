@@ -36,7 +36,7 @@ stage_2:
 transport:
   params:
     path_type: 'Linear'
-    prediction: 'velocity'
+    prediction: 'data'
     loss_weight: null
     time_dist_type: 'uniform'
 

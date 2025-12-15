@@ -22,13 +22,14 @@ stage_2:
     mlp_ratio: 4.0
     class_dropout_prob: 0.1
     num_classes: 1000
-    use_qknorm: False
+    use_qknorm: True
     use_swiglu: True
     use_rope: True
     use_rmsnorm: True
     wo_shift: False
-    use_pos_embed: True
-  ckpt: 'models/DiTs/Dinov2/wReg_base/ImageNet256/DiTDH-XL/stage2_model.pt'
+    use_pos_embed: False
+  # ckpt: 'models/DiTs/Dinov2/wReg_base/ImageNet256/DiTDH-XL/stage2_model.pt'
+  ckpt: 'results/stage2/training/2025-12-14T00-52-23-DiTwDDTHead-Linear-velocity-none-bf16-acc1/checkpoints/0080000.pt'
 
 
 transport:

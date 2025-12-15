@@ -27,8 +27,12 @@ def create_transport(
         model_type = ModelType.NOISE
     elif prediction == "score":
         model_type = ModelType.SCORE
-    else:
+    elif prediction == "velocity":
         model_type = ModelType.VELOCITY
+    elif prediction == "data":
+        model_type = ModelType.DATA
+    else:
+        raise NotImplementedError(f"Invalid prediction type {prediction}.")
 
     if loss_weight == "velocity":
         loss_type = WeightType.VELOCITY
