@@ -142,9 +142,9 @@ class Transport:
             t1 = 1 - eps if (not sde or last_step_size == 0) else 1 - last_step_size
 
         elif (type(self.path_sampler) in [path.ICPlan, path.GVPCPlan]) \
-            and (self.model_type != ModelType.VELOCITY or sde): # avoid numerical issue by taking a first semi-implicit step
+            and (self.model_type not in [ModelType.VELOCITY, ModelType.DATA] or sde): # avoid numerical issue by taking a first semi-implicit step
 
-            t0 = eps if (diffusion_form == "SBDM" and sde) or self.model_type != ModelType.VELOCITY else 0
+            t0 = eps if (diffusion_form == "SBDM" and sde) or self.model_type not in [ModelType.VELOCITY, ModelType.DATA] else 0
             t1 = 1 - eps if (not sde or last_step_size == 0) else 1 - last_step_size
         
         if reverse:
@@ -286,6 +286,8 @@ class Transport:
             score_fn = lambda x, t, model, **kwagrs: model(x, t, **kwagrs)
         elif self.model_type == ModelType.VELOCITY:
             score_fn = lambda x, t, model, **kwargs: self.path_sampler.get_score_from_velocity(model(x, t, **kwargs), x, t)
+        elif self.model_type == ModelType.DATA:
+            score_fn = lambda x, t, model, **kwargs: self.path_sampler.get_score_from_data(model(x, t, **kwargs), x, t)
         else:
             raise NotImplementedError()
         

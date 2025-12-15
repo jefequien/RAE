@@ -84,6 +84,16 @@ class ICPlan:
         score = (reverse_alpha_ratio * velocity - mean) / var
         return score
     
+    def get_score_from_data(self, data, x, t):
+        """Wrapper function: transfrom data prediction model to score
+        Args:
+            data: [batch_dim, ...] shaped tensor; data model output
+            x: [batch_dim, ...] shaped tensor; x_t data point
+            t: [batch_dim,] time tensor
+        """
+        velocity = (x - data) / expand_t_like_x(t, x)
+        return self.get_score_from_velocity(velocity, x, t)
+    
     def get_noise_from_velocity(self, velocity, x, t):
         """Wrapper function: transfrom velocity prediction model to denoiser
         Args:
