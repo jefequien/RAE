@@ -252,11 +252,6 @@ def main(args):
     rae.eval()
 
     model: Stage2ModelProtocol = instantiate_from_config(model_config).to(device)
-    model = torch.compile(
-        model,
-        mode="reduce-overhead",
-        dynamic=False,           # important: diffusion uses fixed shapes
-    )
     emas = [deepcopy(model).to(device) for _ in range(len(ema_decays))]
     for ema in emas:
         requires_grad(ema, False)
@@ -400,13 +395,15 @@ def main(args):
             with autocast(**autocast_kwargs):
                 terms = transport.training_losses(model, x, model_kwargs)
                 raw_loss = terms["loss"]
+                # disc_loss = torch.nn.functional.softplus(-terms["register_logits"]).mean()
+                # raw_loss = terms["loss"] + disc_loss
                 safe_loss = torch.nan_to_num(raw_loss, nan=0.0, posinf=0.0, neginf=0.0)
                 safe_loss = torch.clamp(safe_loss, min=0.0, max=10.0)
                 loss_tensor = safe_loss.mean()
             step_loss_accum += loss_tensor.item()
             (loss_tensor / grad_accum_steps).backward()
-            accum_counter += 1
 
+            accum_counter += 1
             if accum_counter < grad_accum_steps:
                 continue
 
@@ -422,6 +419,32 @@ def main(args):
             train_steps += 1
             accum_counter = 0
             step_loss_accum = 0.0
+
+            # # Use x0_pred to train the discriminator
+            # with autocast(**autocast_kwargs):
+            #     x0_pred = terms['xt'] - expand_t_like_x(terms['t'], terms['xt']) * terms['pred']
+            #     terms = transport.training_losses(model, x, x0_pred.detach(), model_kwargs)
+            #     disc_loss = torch.nn.functional.softplus(terms["register_logits"]).mean()
+            #     raw_loss = terms["loss"] + disc_loss
+            #     safe_loss = torch.nan_to_num(raw_loss, nan=0.0, posinf=0.0, neginf=0.0)
+            #     safe_loss = torch.clamp(safe_loss, min=0.0, max=10.0)
+            #     loss_tensor = 0.5 * safe_loss.mean()
+            # step_loss_accum += loss_tensor.item()
+            # (loss_tensor / grad_accum_steps).backward()
+            # accum_counter += 1
+            # if accum_counter < grad_accum_steps:
+            #     continue
+            # if clip_grad > 0:
+            #     grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), clip_grad)
+            # opt.step()
+            # schedl.step()
+            # update_ema(emas, model.module, decays=ema_decays)
+            # opt.zero_grad()
+            # running_loss += step_loss_accum / grad_accum_steps
+            # log_steps += 1
+            # train_steps += 1
+            # accum_counter = 0
+            # step_loss_accum = 0.0
 
             if train_steps % log_every == 0:
                 torch.cuda.synchronize()
@@ -441,6 +464,9 @@ def main(args):
                     }
                     if clip_grad > 0:
                         log_dict["grad norm"] = grad_norm
+                    # for k, v in terms.items():
+                    #     if "loss" in k or "acc" in k:
+                    #         log_dict[f"train_{k}"] = v.item()
                     wandb_utils.log(log_dict, step=train_steps)
                 running_loss = 0.0
                 log_steps = 0
@@ -474,8 +500,12 @@ def main(args):
 
             if train_steps % sample_every == 0 or train_steps == 1:
                 with torch.no_grad():
-                    # x0_pred = terms['pred']
-                    x0_pred = terms['xt'] - expand_t_like_x(terms['t'], terms['xt']) * terms['pred']
+                    if prediction == 'velocity':
+                        x0_pred = terms['xt'] - expand_t_like_x(terms['t'], terms['xt']) * terms['pred']
+                    elif prediction == 'data':
+                        x0_pred = terms['pred']
+                    else:
+                        raise ValueError(f"Invalid prediction type {prediction}.")
                     wandb_utils.log_image(
                         rae.decode(terms["xt"].to(torch.float32)), 
                         train_steps, 

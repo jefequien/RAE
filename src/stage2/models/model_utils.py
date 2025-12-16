@@ -13,7 +13,7 @@ from einops import rearrange, repeat
 from collections.abc import Callable
 import numpy as np
 
-
+@torch.compile
 def modulate(x, shift, scale):
     return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
 
@@ -265,6 +265,7 @@ class SwiGLUFFN(nn.Module):
         self.w12 = nn.Linear(in_features, 2 * hidden_features, bias=bias)
         self.w3 = nn.Linear(hidden_features, out_features, bias=bias)
 
+    @torch.compile
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x12 = self.w12(x)
         x1, x2 = x12.chunk(2, dim=-1)
@@ -409,6 +410,8 @@ class GaussianFourierEmbedding(nn.Module):
             nn.SiLU(),
             nn.Linear(hidden_size, hidden_size, bias=True),
         )
+    
+    @torch.compile
     def forward(self, t):
         with torch.no_grad():
             W = self.W # stop gradient manually
@@ -441,6 +444,7 @@ class LabelEmbedder(nn.Module):
         labels = torch.where(drop_ids, self.num_classes, labels)
         return labels
 
+    @torch.compile
     def forward(self, labels, train, force_drop_ids=None):
         use_dropout = self.dropout_prob > 0
         if (train and use_dropout) or (force_drop_ids is not None):

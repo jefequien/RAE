@@ -77,6 +77,7 @@ class LightningDiTBlock(nn.Module):
             )
         self.wo_shift = wo_shift
 
+    @torch.compile
     def forward(self, x, c, feat_rope=None):
         if self.wo_shift:
             scale_msa, gate_msa, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(4, dim=1)
@@ -102,6 +103,8 @@ class LightningFinalLayer(nn.Module):
             nn.SiLU(),
             nn.Linear(hidden_size, 2 * hidden_size, bias=True)
         )
+    
+    @torch.compile
     def forward(self, x, c):
         shift, scale = self.adaLN_modulation(c).chunk(2, dim=1)
         x = modulate(self.norm_final(x), shift, scale)
@@ -121,34 +124,35 @@ class LightningDiT(nn.Module):
         depth=28,
         num_heads=16,
         mlp_ratio=4.0,
+        num_register_tokens=0,
         class_dropout_prob=0.1,
         num_classes=1000,
-        learn_sigma=False,
         use_qknorm=False,
         use_swiglu=True,
         use_rope=True,
         use_rmsnorm=True,
         wo_shift=False,
-        use_gembed: bool = True,    
+        use_pos_embed: bool = True,
     ):
         super().__init__()
-        self.learn_sigma = learn_sigma
         self.in_channels = in_channels
-        self.out_channels = in_channels if not learn_sigma else in_channels * 2
+        self.out_channels = in_channels
         self.patch_size = patch_size
         self.num_heads = num_heads
         self.use_rope = use_rope
         self.use_rmsnorm = use_rmsnorm
+        self.use_pos_embed = use_pos_embed
         self.depth = depth
         self.hidden_size = hidden_size
-        self.use_gembed = use_gembed
+        self.num_register_tokens = num_register_tokens
         self.x_embedder = PatchEmbed(input_size, patch_size, in_channels, hidden_size, bias=True)
         self.t_embedder = GaussianFourierEmbedding(hidden_size)
         self.y_embedder = LabelEmbedder(num_classes, hidden_size, class_dropout_prob)
         self.ssl_supervise = False
         num_patches = self.x_embedder.num_patches
         # Will use fixed sin-cos embedding:
-        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, hidden_size), requires_grad=False)
+        if self.use_pos_embed:
+            self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, hidden_size), requires_grad=False)
 
         # use rotary position encoding, borrow from EVA
         if self.use_rope:
@@ -161,15 +165,21 @@ class LightningDiT(nn.Module):
         else:
             self.feat_rope = None
 
+        if self.num_register_tokens > 0:
+            self.register_tokens = nn.Parameter(torch.randn(num_register_tokens, hidden_size))
+            # self.register_head = nn.Linear(hidden_size, 1)
+
         self.blocks = nn.ModuleList([
-            LightningDiTBlock(hidden_size, 
-                     num_heads, 
-                     mlp_ratio=mlp_ratio, 
-                     use_qknorm=use_qknorm, 
-                     use_swiglu=use_swiglu, 
-                     use_rmsnorm=use_rmsnorm,
-                     wo_shift=wo_shift,
-                     ) for _ in range(depth)
+            LightningDiTBlock(
+                hidden_size, 
+                num_heads, 
+                mlp_ratio=mlp_ratio, 
+                use_qknorm=use_qknorm, 
+                use_swiglu=use_swiglu, 
+                use_rmsnorm=use_rmsnorm,
+                wo_shift=wo_shift,
+                num_register_tokens=num_register_tokens,
+            ) for _ in range(depth)
         ])
         self.final_layer = LightningFinalLayer(hidden_size, patch_size, self.out_channels, use_rmsnorm=use_rmsnorm)
         self.initialize_weights()
@@ -184,8 +194,9 @@ class LightningDiT(nn.Module):
         self.apply(_basic_init)
 
         # Initialize (and freeze) pos_embed by sin-cos embedding:
-        pos_embed = get_2d_sincos_pos_embed(self.pos_embed.shape[-1], int(self.x_embedder.num_patches ** 0.5))
-        self.pos_embed.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
+        if self.use_pos_embed:
+            pos_embed = get_2d_sincos_pos_embed(self.pos_embed.shape[-1], int(self.x_embedder.num_patches ** 0.5))
+            self.pos_embed.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
 
         # Initialize patch_embed like nn.Linear (instead of nn.Conv2d):
         w = self.x_embedder.proj.weight.data
@@ -233,20 +244,34 @@ class LightningDiT(nn.Module):
         y: (N,) tensor of class labels
         use_checkpoint: boolean to toggle checkpointing
         """
-        x = self.x_embedder(x) + self.pos_embed  # (N, T, D), where T = H * W / patch_size ** 2
+        x = self.x_embedder(x)
+        if self.use_pos_embed:
+            x = x + self.pos_embed  # (N, T, D), where T = H * W / patch_size ** 2
+        if self.num_register_tokens > 0:
+            reg = self.register_tokens.unsqueeze(0).expand(x.shape[0], -1, -1)  # [B, R, D]
+            x = torch.cat([reg, x], dim=1)  # [B, R + T, D]
         t = self.t_embedder(t)                   # (N, D)
         y = self.y_embedder(y, self.training)    # (N, D)
         c = t + y                                # (N, D)
 
         for block in self.blocks:
             x = block(x, c, feat_rope=self.feat_rope)
+        
+        if self.num_register_tokens > 0:
+            image_patches = self.final_layer(x[:, self.num_register_tokens:, :], c)
+        else:
+            image_patches = self.final_layer(x, c)
+        image_out = self.unpatchify(image_patches)
 
-        x = self.final_layer(x, c)                # (N, T, patch_size ** 2 * out_channels)
-        x = self.unpatchify(x)                   # (N, out_channels, H, W)
+        model_out = {'image': image_out}
+        # if self.num_register_tokens > 0:
+        #     model_out['register_tokens'] = x[:, :self.num_register_tokens, :]
+        #     model_out['register_logits'] = self.register_head(x[:, :self.num_register_tokens, :])
+        return model_out
 
-        if self.learn_sigma:
-            x, _ = x.chunk(2, dim=1)
-        return x
+        # if self.learn_sigma:
+        #     x, _ = x.chunk(2, dim=1)
+        # return x
 
     def forward_with_cfg(self, x, t, y, cfg_scale, cfg_interval=(-1e4, -1e4), interval_cfg: float = 0.0):
         """

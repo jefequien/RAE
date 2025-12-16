@@ -213,9 +213,6 @@ class DiTwDDTHead(nn.Module):
         self.num_blocks = depth[0] + depth[1]
         self.use_rope = use_rope
         self.num_register_tokens = num_register_tokens
-        if self.num_register_tokens > 0:
-            self.register_tokens = nn.Parameter(torch.randn(num_register_tokens, hidden_size[0]))
-            self.register_head = nn.Linear(hidden_size[1], 1)
         # analyze patch size
         if isinstance(patch_size, int) or isinstance(patch_size, float):
             patch_size = [patch_size, patch_size]  # patch size for s , x embed
@@ -271,6 +268,9 @@ class DiTwDDTHead(nn.Module):
             )
         else:
             self.feat_rope = None
+        if self.num_register_tokens > 0:
+            self.register_tokens = nn.Parameter(torch.randn(num_register_tokens, hidden_size[0]))
+            self.register_head = nn.Linear(hidden_size[1], 1)
         self.blocks = nn.ModuleList([
             LightningDDTBlock(self.encoder_hidden_size if i < self.num_encoder_blocks else self.decoder_hidden_size,
                               enc_num_heads if i < self.num_encoder_blocks else dec_num_heads,

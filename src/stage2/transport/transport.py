@@ -185,6 +185,7 @@ class Transport:
         self, 
         model,  
         x1, 
+        # x1_fake=None,
         model_kwargs=None
     ):
         """Loss for training the score model
@@ -198,18 +199,21 @@ class Transport:
         
         t, x0, x1 = self.sample(x1)
         t, xt, ut = self.path_sampler.plan(t, x0, x1)
-        model_output = model(xt, t, **model_kwargs)
+        # if x1_fake is not None:
+        #     _, xt, _ = self.path_sampler.plan(t, x0, x1_fake)
+        model_output = model(xt, t, **model_kwargs)['image']
         B, *_, C = xt.shape
-        assert model_output['image'].size() == (B, *xt.size()[1:-1], C)
+        assert model_output.size() == (B, *xt.size()[1:-1], C)
 
         terms = {}
         terms['t'] = t
         terms['xt'] = xt
-        terms['pred'] = model_output['image']
+        terms['pred'] = model_output
+        # terms['register_logits'] = model_output['register_logits'][:, 0]
         if self.model_type == ModelType.VELOCITY:
             terms['loss'] = mean_flat(((terms['pred'] - ut) ** 2))
         elif self.model_type == ModelType.DATA:
-            v_pred = (xt - terms['pred']) / path.expand_t_like_x(t, xt)
+            v_pred = (xt - terms['pred']) / path.expand_t_like_x(t.clip(0.05), xt)
             terms['loss'] = mean_flat(((v_pred - ut) ** 2))
         else: 
             _, drift_var = self.path_sampler.compute_drift(xt, t)
@@ -227,8 +231,22 @@ class Transport:
                 terms['loss'] = mean_flat(weight * ((terms['pred'] - x0) ** 2))
             else:
                 terms['loss'] = mean_flat(weight * ((terms['pred'] * sigma_t + x0) ** 2))
-                
+        
+        # _, xt_fake, ut_fake = self.path_sampler.plan(t, x0, terms['pred'])
+        # model_output_fake = model(xt_fake, t, **model_kwargs)
+        # terms['loss_fake'] = mean_flat(((model_output_fake - ut_fake) ** 2))
+        # logit_real = model_output['register_logits'][:, 0]
+        # logit_fake = model_output_fake['register_logits'][:, 0]
+        # terms['loss_disc'] = 0.5 * (F.softplus(-logit_real).mean() + F.softplus(logit_fake).mean())
+
+        # pred_real = (logit_real > 0).float()   # predicted as real if logit > 0
+        # pred_fake = (logit_fake < 0).float()   # predicted as fake if logit < 0
+        # acc_real = pred_real.mean().item()
+        # acc_fake = pred_fake.mean().item()
+        # terms['disc_acc'] = 0.5 * (acc_real + acc_fake)
         return terms
+        # terms['loss_disc_acc'] = (logit_fake > 0).float().mean()
+        # terms['loss_gen'] = F.softplus(-logit_fake).mean()
     
 
     def get_drift(
@@ -253,7 +271,7 @@ class Transport:
         
         def data_ode(x, t, model, **model_kwargs):
             model_output = model(x, t, **model_kwargs)['image']
-            v_pred = (x - model_output) / path.expand_t_like_x(t, x)
+            v_pred = (x - model_output) / path.expand_t_like_x(t.clip(0.05), x)
             return v_pred
 
         if self.model_type == ModelType.NOISE:
