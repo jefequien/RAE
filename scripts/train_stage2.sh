@@ -25,7 +25,7 @@ source $SCRATCH/miniforge3/bin/activate rae
 
 # Config
 STAGE_NAME="stage2"
-MODEL_NAME="DiT-L"
+MODEL_NAME="DiT-B"
 CONFIG_PATH=configs/${STAGE_NAME}/training/ImageNet256/${MODEL_NAME}_DINOv2-B.yaml
 DATA_PATH="data/imagenet-1k/ImageNet/train"
 
@@ -58,7 +58,7 @@ torchrun --standalone \
     --precision bf16 \
     --image-size 256 \
     --global-batch-size 1024 \
-    --micro-batch-size 128 \
+    --micro-batch-size 256 \
     --log-every 50 \
     --ckpt-every 5000 \
     --sample-every 5000 \

@@ -40,7 +40,7 @@ def instantiate_from_config(config) -> object:
                 new_state_dict[k] = v
         state_dict = new_state_dict
         
-        model.load_state_dict(state_dict, strict=True)
+        model.load_state_dict(state_dict, strict=False)
         print(f'target {config["target"]} loaded from {ckpt_path}')
     return model
 

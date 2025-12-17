@@ -22,7 +22,7 @@ source $SCRATCH/miniforge3/bin/activate rae
 
 # Config
 STAGE_NAME="stage2"
-MODEL_NAME="DiTDH-S"
+MODEL_NAME="DiT-B"
 CONFIG_PATH=configs/${STAGE_NAME}/sampling/ImageNet256/${MODEL_NAME}_DINOv2-B.yaml
 
 # -------------------------------
