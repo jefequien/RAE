@@ -133,6 +133,7 @@ class LightningDiT(nn.Module):
         use_rmsnorm=True,
         wo_shift=False,
         use_pos_embed: bool = True,
+        use_discriminator: bool = False,
     ):
         super().__init__()
         self.in_channels = in_channels
@@ -142,6 +143,7 @@ class LightningDiT(nn.Module):
         self.use_rope = use_rope
         self.use_rmsnorm = use_rmsnorm
         self.use_pos_embed = use_pos_embed
+        self.use_discriminator = use_discriminator
         self.depth = depth
         self.hidden_size = hidden_size
         self.num_register_tokens = num_register_tokens
@@ -167,7 +169,9 @@ class LightningDiT(nn.Module):
 
         if self.num_register_tokens > 0:
             self.register_tokens = nn.Parameter(torch.randn(num_register_tokens, hidden_size))
-            # self.register_head = nn.Linear(hidden_size, 1)
+        if self.use_discriminator:
+            assert self.num_register_tokens > 0, "Discriminator requires register tokens"
+            self.discriminator = nn.Linear(hidden_size, 1)
 
         self.blocks = nn.ModuleList([
             LightningDiTBlock(
@@ -221,6 +225,10 @@ class LightningDiT(nn.Module):
         nn.init.constant_(self.final_layer.linear.weight, 0)
         nn.init.constant_(self.final_layer.linear.bias, 0)
 
+        if self.use_discriminator:
+            nn.init.constant_(self.discriminator.weight, 0)
+            nn.init.constant_(self.discriminator.bias, 0)
+
     def unpatchify(self, x):
         """
         x: (N, T, patch_size**2 * C)
@@ -264,14 +272,10 @@ class LightningDiT(nn.Module):
         image_out = self.unpatchify(image_patches)
 
         model_out = {'image': image_out}
-        # if self.num_register_tokens > 0:
-        #     model_out['register_tokens'] = x[:, :self.num_register_tokens, :]
-        #     model_out['register_logits'] = self.register_head(x[:, :self.num_register_tokens, :])
+        if self.use_discriminator:
+            disc_logits = self.discriminator(x[:, 0, :]) # use the first register token to predict the discriminator
+            model_out['disc_logits'] = disc_logits
         return model_out
-
-        # if self.learn_sigma:
-        #     x, _ = x.chunk(2, dim=1)
-        # return x
 
     def forward_with_cfg(self, x, t, y, cfg_scale, cfg_interval=(-1e4, -1e4), interval_cfg: float = 0.0):
         """

@@ -32,6 +32,8 @@ stage_2:
     use_rmsnorm: true
     wo_shift: false
     use_pos_embed: false
+    use_discriminator: false
+
 
 transport:
   params:
@@ -66,7 +68,7 @@ training:
   epochs: 80
   global_batch_size: 1024
   micro_batch_size: 1 # change according to your GPU memory
-  ema_decays: [0.9995, 0.9999]
+  ema_decays: [0.9995, 0.9996, 0.9998]
   num_workers: 4
   log_every: 100
   ckpt_every: 5000
@@ -75,5 +77,5 @@ training:
   beta: [0.9, 0.95]
   wd: 0.0
   schedule_type: 'constant'
-  warmup_steps: 0
+  warmup_epochs: 10
   clip_grad: 1.0

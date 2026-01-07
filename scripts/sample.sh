@@ -22,7 +22,7 @@ source $SCRATCH/miniforge3/bin/activate rae
 
 # Config
 STAGE_NAME="stage2"
-MODEL_NAME="DiT-B"
+MODEL_NAME="DiT-M"
 CONFIG_PATH=configs/${STAGE_NAME}/sampling/ImageNet256/${MODEL_NAME}_DINOv2-B.yaml
 
 # -------------------------------
@@ -46,6 +46,6 @@ torchrun --standalone \
     --nproc_per_node=$GPUS_PER_NODE \
     src/sample_ddp.py \
     --config $CONFIG_PATH \
-    --sample-dir results/${STAGE_NAME}/samples \
+    --sample-dir results/${STAGE_NAME}/samples/${MODEL_NAME} \
     --precision bf16 \
     --label-sampling equal

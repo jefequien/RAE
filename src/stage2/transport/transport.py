@@ -1,6 +1,7 @@
 import torch as th
 import numpy as np
 import logging
+import torch.nn.functional as F
 
 import enum
 
@@ -185,7 +186,6 @@ class Transport:
         self, 
         model,  
         x1, 
-        # x1_fake=None,
         model_kwargs=None
     ):
         """Loss for training the score model
@@ -199,22 +199,19 @@ class Transport:
         
         t, x0, x1 = self.sample(x1)
         t, xt, ut = self.path_sampler.plan(t, x0, x1)
-        # if x1_fake is not None:
-        #     _, xt, _ = self.path_sampler.plan(t, x0, x1_fake)
-        model_output = model(xt, t, **model_kwargs)['image']
+        model_output_real = model(xt, t, **model_kwargs)
         B, *_, C = xt.shape
-        assert model_output.size() == (B, *xt.size()[1:-1], C)
+        assert model_output_real['image'].size() == (B, *xt.size()[1:-1], C)
 
         terms = {}
-        terms['t'] = t
-        terms['xt'] = xt
-        terms['pred'] = model_output
-        # terms['register_logits'] = model_output['register_logits'][:, 0]
+        terms['xt_real'] = xt
         if self.model_type == ModelType.VELOCITY:
-            terms['loss'] = mean_flat(((terms['pred'] - ut) ** 2))
+            terms['loss_real'] = mean_flat(((model_output_real['image'] - ut) ** 2))
+            terms['pred_real'] = xt - path.expand_t_like_x(t, xt) * model_output_real['image']
         elif self.model_type == ModelType.DATA:
-            v_pred = (xt - terms['pred']) / path.expand_t_like_x(t.clip(0.05), xt)
-            terms['loss'] = mean_flat(((v_pred - ut) ** 2))
+            v_pred = (xt - model_output_real['image']) / path.expand_t_like_x(t.clip(0.05), xt)
+            terms['loss_real'] = mean_flat(((v_pred - ut) ** 2))
+            terms['pred_real'] = model_output_real['image']
         else: 
             _, drift_var = self.path_sampler.compute_drift(xt, t)
             sigma_t, _ = self.path_sampler.compute_sigma_t(path.expand_t_like_x(t, xt))
@@ -228,25 +225,39 @@ class Transport:
                 raise NotImplementedError()
             
             if self.model_type == ModelType.NOISE:
-                terms['loss'] = mean_flat(weight * ((terms['pred'] - x0) ** 2))
+                terms['loss_real'] = mean_flat(weight * ((model_output_real['image'] - x0) ** 2))
             else:
-                terms['loss'] = mean_flat(weight * ((terms['pred'] * sigma_t + x0) ** 2))
+                terms['loss_real'] = mean_flat(weight * ((model_output_real['image'] * sigma_t + x0) ** 2))
         
-        # _, xt_fake, ut_fake = self.path_sampler.plan(t, x0, terms['pred'])
-        # model_output_fake = model(xt_fake, t, **model_kwargs)
-        # terms['loss_fake'] = mean_flat(((model_output_fake - ut_fake) ** 2))
-        # logit_real = model_output['register_logits'][:, 0]
-        # logit_fake = model_output_fake['register_logits'][:, 0]
-        # terms['loss_disc'] = 0.5 * (F.softplus(-logit_real).mean() + F.softplus(logit_fake).mean())
+        if model.module.use_discriminator:
+            x1_fake = terms['pred_real'].detach()
+            # t_fake, x0_fake, x1_fake = self.sample(x1_fake)
+            # t_fake, xt_fake, ut_fake = self.path_sampler.plan(t_fake, x0_fake, x1_fake)
+            t_fake, x0_fake = t, x0
+            t_fake, xt_fake, ut_fake = self.path_sampler.plan(t_fake, x0_fake, x1_fake)
+            model_output_fake = model(xt_fake, t_fake, **model_kwargs)
+            terms['xt_fake'] = xt_fake
+            if self.model_type == ModelType.VELOCITY:
+                terms['loss_fake'] = mean_flat(((model_output_fake['image'] - (ut_fake + x1_fake - x1)) ** 2))
+                terms['pred_fake'] = xt_fake - path.expand_t_like_x(t_fake, xt_fake) * model_output_fake['image']
+            elif self.model_type == ModelType.DATA:
+                v_pred_fake = (xt_fake - model_output_fake['image']) / path.expand_t_like_x(t_fake.clip(0.05), xt_fake)
+                terms['loss_fake'] = mean_flat(((v_pred_fake - (ut_fake + x1_fake - x1)) ** 2))
+                terms['pred_fake'] = model_output_fake['image']
+            
+            logit_real = model_output_real['disc_logits'][:, 0]
+            logit_fake = model_output_fake['disc_logits'][:, 0]
+            terms['loss_disc'] = 0.1 * (F.softplus(-logit_real) + F.softplus(logit_fake))
 
-        # pred_real = (logit_real > 0).float()   # predicted as real if logit > 0
-        # pred_fake = (logit_fake < 0).float()   # predicted as fake if logit < 0
-        # acc_real = pred_real.mean().item()
-        # acc_fake = pred_fake.mean().item()
-        # terms['disc_acc'] = 0.5 * (acc_real + acc_fake)
+            acc_real = (logit_real > 0).float().mean()   # predicted as real if logit > 0
+            acc_fake = (logit_fake < 0).float().mean()   # predicted as fake if logit < 0
+            terms['acc_disc'] = 0.5 * (acc_real + acc_fake)
+
+            # reward = logit_fake.detach()  # realism score
+            # advantage = (reward - reward.mean()) / (reward.std() + 1e-6)
+            # beta = 1.0
+            # terms['weight_real'] = th.exp(-beta * advantage).clamp(max=10.0)
         return terms
-        # terms['loss_disc_acc'] = (logit_fake > 0).float().mean()
-        # terms['loss_gen'] = F.softplus(-logit_fake).mean()
     
 
     def get_drift(

@@ -195,6 +195,8 @@ class VisionRotaryEmbeddingFast(nn.Module):
             # assert torch.allclose(freqs_cos[::2], freqs_cos[1::2]), 'repeated freqs_cos are not the same'
             # assert torch.allclose(freqs_sin[::2], freqs_sin[1::2]), 'repeated freqs_sin are not the same'
         # apply repeated freqs
+        # freqs_cos = freqs_cos.clone()
+        # freqs_sin = freqs_sin.clone()
         return t * freqs_cos + rotate_half(t) * freqs_sin
 
 

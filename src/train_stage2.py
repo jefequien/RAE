@@ -23,6 +23,7 @@ from datetime import datetime
 from time import time
 import argparse
 import logging
+from collections import defaultdict
 
 import math
 from torch.cuda.amp import autocast
@@ -191,6 +192,7 @@ def main(args):
     torch.cuda.manual_seed(seed)
     if rank == 0:
         print(f"Starting rank={rank}, seed={seed}, world_size={world_size}.")
+    # torch.autograd.set_detect_anomaly(True)
 
     grad_accum_steps = global_batch_size // (world_size * micro_batch_size)
     use_bf16 = args.precision == "bf16"
@@ -351,7 +353,7 @@ def main(args):
         ema.eval()
 
     log_steps = 0
-    running_loss = 0.0
+    running_losses = defaultdict(float)
     start_time = time()
 
     ys = torch.randint(num_classes, size=(micro_batch_size,), device=device)
@@ -385,7 +387,7 @@ def main(args):
         logger.info(f"Beginning epoch {epoch}...")
         opt.zero_grad()
         accum_counter = 0
-        step_loss_accum = 0.0
+        step_losses_accum = defaultdict(float)
         for x, y in loader:
             x = x.to(device)
             y = y.to(device)
@@ -394,13 +396,16 @@ def main(args):
             model_kwargs = dict(y=y)
             with autocast(**autocast_kwargs):
                 terms = transport.training_losses(model, x, model_kwargs)
-                raw_loss = terms["loss"]
-                # disc_loss = torch.nn.functional.softplus(-terms["register_logits"]).mean()
-                # raw_loss = terms["loss"] + disc_loss
-                safe_loss = torch.nan_to_num(raw_loss, nan=0.0, posinf=0.0, neginf=0.0)
-                safe_loss = torch.clamp(safe_loss, min=0.0, max=10.0)
-                loss_tensor = safe_loss.mean()
-            step_loss_accum += loss_tensor.item()
+                raw_loss = terms['loss_real']
+                if model.module.use_discriminator:
+                    raw_loss += terms['loss_fake'] + terms['loss_disc']
+                # safe_loss = torch.nan_to_num(raw_loss, nan=0.0, posinf=0.0, neginf=0.0)
+                # safe_loss = torch.clamp(safe_loss, min=0.0, max=10.0)
+                loss_tensor = raw_loss.mean()
+            step_losses_accum['loss'] += loss_tensor.item()
+            for k, v in terms.items():
+                if "loss_" in k:
+                    step_losses_accum[k] += v.mean().item()
             (loss_tensor / grad_accum_steps).backward()
 
             accum_counter += 1
@@ -414,49 +419,24 @@ def main(args):
             update_ema(emas, model.module, decays=ema_decays)
             opt.zero_grad()
 
-            running_loss += step_loss_accum / grad_accum_steps
+            running_losses = {k: running_losses[k] + v / grad_accum_steps for k, v in step_losses_accum.items()}
             log_steps += 1
             train_steps += 1
             accum_counter = 0
-            step_loss_accum = 0.0
-
-            # # Use x0_pred to train the discriminator
-            # with autocast(**autocast_kwargs):
-            #     x0_pred = terms['xt'] - expand_t_like_x(terms['t'], terms['xt']) * terms['pred']
-            #     terms = transport.training_losses(model, x, x0_pred.detach(), model_kwargs)
-            #     disc_loss = torch.nn.functional.softplus(terms["register_logits"]).mean()
-            #     raw_loss = terms["loss"] + disc_loss
-            #     safe_loss = torch.nan_to_num(raw_loss, nan=0.0, posinf=0.0, neginf=0.0)
-            #     safe_loss = torch.clamp(safe_loss, min=0.0, max=10.0)
-            #     loss_tensor = 0.5 * safe_loss.mean()
-            # step_loss_accum += loss_tensor.item()
-            # (loss_tensor / grad_accum_steps).backward()
-            # accum_counter += 1
-            # if accum_counter < grad_accum_steps:
-            #     continue
-            # if clip_grad > 0:
-            #     grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), clip_grad)
-            # opt.step()
-            # schedl.step()
-            # update_ema(emas, model.module, decays=ema_decays)
-            # opt.zero_grad()
-            # running_loss += step_loss_accum / grad_accum_steps
-            # log_steps += 1
-            # train_steps += 1
-            # accum_counter = 0
-            # step_loss_accum = 0.0
+            step_losses_accum = defaultdict(float)
 
             if train_steps % log_every == 0:
                 torch.cuda.synchronize()
                 end_time = time()
                 steps_per_sec = log_steps / (end_time - start_time)
-                avg_loss = torch.tensor(running_loss / log_steps, device=device)
-                dist.all_reduce(avg_loss, op=dist.ReduceOp.SUM)
-                avg_loss = avg_loss.item() / world_size
-                logger.info(f"(step={train_steps:07d}) Train Loss: {avg_loss:.4f}, Train Steps/Sec: {steps_per_sec:.2f}")
+                avg_losses = {k: torch.tensor(v / log_steps, device=device) for k, v in running_losses.items()}
+                for _, v in avg_losses.items():
+                    dist.all_reduce(v, op=dist.ReduceOp.SUM)
+                avg_losses = {k: v.item() / world_size for k, v in avg_losses.items()}
+                logger.info(f"(step={train_steps:07d}) Train Loss: {avg_losses['loss']:.4f}, Train Steps/Sec: {steps_per_sec:.2f}")
                 if args.wandb:
                     log_dict = {
-                        "train loss": avg_loss,
+                        "train loss": avg_losses["loss"],
                         "train steps/sec": steps_per_sec,
                         "learning rate": opt.param_groups[0]["lr"],
                         "epoch": epoch,
@@ -464,11 +444,19 @@ def main(args):
                     }
                     if clip_grad > 0:
                         log_dict["grad norm"] = grad_norm
+                    for k, v in avg_losses.items():
+                        if "loss_" in k:
+                            log_dict[f"losses/{k}"] = v
                     # for k, v in terms.items():
-                    #     if "loss" in k or "acc" in k:
-                    #         log_dict[f"train_{k}"] = v.item()
+                    #     if "loss" in k:
+                    #         log_dict[f"losses/{k}"] = v.mean().item()
+                    #     if "acc" in k:
+                    #         log_dict[f"misc/{k}"] = v.item()
+                        # if "weight" in k:
+                        #     log_dict[f"misc/{k} mean"] = v.mean().item()
+                        #     log_dict[f"misc/{k} std"] = v.std().item()
                     wandb_utils.log(log_dict, step=train_steps)
-                running_loss = 0.0
+                running_losses = defaultdict(float)
                 log_steps = 0
                 start_time = time()
 
@@ -500,22 +488,27 @@ def main(args):
 
             if train_steps % sample_every == 0 or train_steps == 1:
                 with torch.no_grad():
-                    if prediction == 'velocity':
-                        x0_pred = terms['xt'] - expand_t_like_x(terms['t'], terms['xt']) * terms['pred']
-                    elif prediction == 'data':
-                        x0_pred = terms['pred']
-                    else:
-                        raise ValueError(f"Invalid prediction type {prediction}.")
                     wandb_utils.log_image(
-                        rae.decode(terms["xt"].to(torch.float32)), 
+                        rae.decode(terms["xt_real"].to(torch.float32)), 
                         train_steps, 
-                        name="samples/xt", 
+                        name="samples/xt_real", 
                     )
                     wandb_utils.log_image(
-                        rae.decode(x0_pred.to(torch.float32)), 
+                        rae.decode(terms['pred_real'].to(torch.float32)), 
                         train_steps, 
-                        name="samples/x0", 
+                        name="samples/pred_real", 
                     )
+                    if model.module.use_discriminator:
+                        wandb_utils.log_image(
+                            rae.decode(terms["xt_fake"].to(torch.float32)), 
+                            train_steps, 
+                            name="samples/xt_fake", 
+                        )
+                        wandb_utils.log_image(
+                            rae.decode(terms["pred_fake"].to(torch.float32)), 
+                            train_steps, 
+                            name="samples/pred_fake", 
+                        )
 
                 logger.info("Generating EMA samples...")
                 with torch.no_grad():

@@ -25,7 +25,7 @@ source $SCRATCH/miniforge3/bin/activate rae
 
 # Config
 STAGE_NAME="stage2"
-MODEL_NAME="DiT-B"
+MODEL_NAME="DiT-M"
 CONFIG_PATH=configs/${STAGE_NAME}/training/ImageNet256/${MODEL_NAME}_DINOv2-B.yaml
 DATA_PATH="data/imagenet-1k/ImageNet/train"
 
