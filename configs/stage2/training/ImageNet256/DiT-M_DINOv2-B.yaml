@@ -32,7 +32,6 @@ stage_2:
     use_rmsnorm: true
     wo_shift: false
     use_pos_embed: false
-    use_discriminator: false
 
 
 transport:

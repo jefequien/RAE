@@ -228,35 +228,6 @@ class Transport:
                 terms['loss_real'] = mean_flat(weight * ((model_output_real['image'] - x0) ** 2))
             else:
                 terms['loss_real'] = mean_flat(weight * ((model_output_real['image'] * sigma_t + x0) ** 2))
-        
-        if model.module.use_discriminator:
-            x1_fake = terms['pred_real'].detach()
-            # t_fake, x0_fake, x1_fake = self.sample(x1_fake)
-            # t_fake, xt_fake, ut_fake = self.path_sampler.plan(t_fake, x0_fake, x1_fake)
-            t_fake, x0_fake = t, x0
-            t_fake, xt_fake, ut_fake = self.path_sampler.plan(t_fake, x0_fake, x1_fake)
-            model_output_fake = model(xt_fake, t_fake, **model_kwargs)
-            terms['xt_fake'] = xt_fake
-            if self.model_type == ModelType.VELOCITY:
-                terms['loss_fake'] = mean_flat(((model_output_fake['image'] - (ut_fake + x1_fake - x1)) ** 2))
-                terms['pred_fake'] = xt_fake - path.expand_t_like_x(t_fake, xt_fake) * model_output_fake['image']
-            elif self.model_type == ModelType.DATA:
-                v_pred_fake = (xt_fake - model_output_fake['image']) / path.expand_t_like_x(t_fake.clip(0.05), xt_fake)
-                terms['loss_fake'] = mean_flat(((v_pred_fake - (ut_fake + x1_fake - x1)) ** 2))
-                terms['pred_fake'] = model_output_fake['image']
-            
-            logit_real = model_output_real['disc_logits'][:, 0]
-            logit_fake = model_output_fake['disc_logits'][:, 0]
-            terms['loss_disc'] = 0.1 * (F.softplus(-logit_real) + F.softplus(logit_fake))
-
-            acc_real = (logit_real > 0).float().mean()   # predicted as real if logit > 0
-            acc_fake = (logit_fake < 0).float().mean()   # predicted as fake if logit < 0
-            terms['acc_disc'] = 0.5 * (acc_real + acc_fake)
-
-            # reward = logit_fake.detach()  # realism score
-            # advantage = (reward - reward.mean()) / (reward.std() + 1e-6)
-            # beta = 1.0
-            # terms['weight_real'] = th.exp(-beta * advantage).clamp(max=10.0)
         return terms
     
 

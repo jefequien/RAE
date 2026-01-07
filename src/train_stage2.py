@@ -397,8 +397,6 @@ def main(args):
             with autocast(**autocast_kwargs):
                 terms = transport.training_losses(model, x, model_kwargs)
                 raw_loss = terms['loss_real']
-                if model.module.use_discriminator:
-                    raw_loss += terms['loss_fake'] + terms['loss_disc']
                 # safe_loss = torch.nan_to_num(raw_loss, nan=0.0, posinf=0.0, neginf=0.0)
                 # safe_loss = torch.clamp(safe_loss, min=0.0, max=10.0)
                 loss_tensor = raw_loss.mean()
@@ -498,17 +496,6 @@ def main(args):
                         train_steps, 
                         name="samples/pred_real", 
                     )
-                    if model.module.use_discriminator:
-                        wandb_utils.log_image(
-                            rae.decode(terms["xt_fake"].to(torch.float32)), 
-                            train_steps, 
-                            name="samples/xt_fake", 
-                        )
-                        wandb_utils.log_image(
-                            rae.decode(terms["pred_fake"].to(torch.float32)), 
-                            train_steps, 
-                            name="samples/pred_fake", 
-                        )
 
                 logger.info("Generating EMA samples...")
                 with torch.no_grad():
