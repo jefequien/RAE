@@ -23,7 +23,7 @@ stage_2:
     depth: 12
     num_heads: 16
     mlp_ratio: 4.0
-    num_register_tokens: 4
+    num_register_tokens: 256
     class_dropout_prob: 0.1
     num_classes: 1000
     use_qknorm: true
@@ -32,6 +32,7 @@ stage_2:
     use_rmsnorm: true
     wo_shift: false
     use_pos_embed: false
+    use_register_space: true
 
 
 transport:

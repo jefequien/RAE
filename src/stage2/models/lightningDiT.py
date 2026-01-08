@@ -3,6 +3,7 @@ import torch.nn as nn
 from timm.models.vision_transformer import PatchEmbed, Mlp
 import torch
 from torch import nn
+from einops import repeat
 
 from .model_utils import VisionRotaryEmbeddingFast, SwiGLUFFN, RMSNorm, NormAttention, LabelEmbedder, get_2d_sincos_pos_embed, GaussianFourierEmbedding, modulate
 
@@ -31,7 +32,6 @@ class LightningDiTBlock(nn.Module):
         **block_kwargs
     ):
         super().__init__()
-        
         # Initialize normalization layers
         if not use_rmsnorm:
             self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
@@ -78,14 +78,14 @@ class LightningDiTBlock(nn.Module):
         self.wo_shift = wo_shift
 
     @torch.compile
-    def forward(self, x, c, feat_rope=None):
+    def forward(self, x, c, x_kv=None, rope_q=None, rope_k=None, num_rope_tokens=None):
         if self.wo_shift:
             scale_msa, gate_msa, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(4, dim=1)
             shift_msa = None
             shift_mlp = None
         else:
             shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(6, dim=1)
-        x = x + gate_msa.unsqueeze(1) * self.attn(modulate(self.norm1(x), shift_msa, scale_msa), rope=feat_rope)
+        x = x + gate_msa.unsqueeze(1) * self.attn(modulate(self.norm1(x), shift_msa, scale_msa), x_kv=x_kv, rope_q=rope_q, rope_k=rope_k, num_rope_tokens=num_rope_tokens)
         x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
         return x
 class LightningFinalLayer(nn.Module):
@@ -107,8 +107,8 @@ class LightningFinalLayer(nn.Module):
     @torch.compile
     def forward(self, x, c):
         shift, scale = self.adaLN_modulation(c).chunk(2, dim=1)
-        x = modulate(self.norm_final(x), shift, scale)
-        x = self.linear(x)
+        x = self.linear(modulate(self.norm_final(x), shift, scale))
+        # x = self.linear(self.norm_final(x))
         return x
 
 class LightningDiT(nn.Module):
@@ -133,6 +133,7 @@ class LightningDiT(nn.Module):
         use_rmsnorm=True,
         wo_shift=False,
         use_pos_embed: bool = True,
+        use_register_space: bool = False,
     ):
         super().__init__()
         self.in_channels = in_channels
@@ -142,6 +143,7 @@ class LightningDiT(nn.Module):
         self.use_rope = use_rope
         self.use_rmsnorm = use_rmsnorm
         self.use_pos_embed = use_pos_embed
+        self.use_register_space = use_register_space
         self.depth = depth
         self.hidden_size = hidden_size
         self.num_register_tokens = num_register_tokens
@@ -149,10 +151,10 @@ class LightningDiT(nn.Module):
         self.t_embedder = GaussianFourierEmbedding(hidden_size)
         self.y_embedder = LabelEmbedder(num_classes, hidden_size, class_dropout_prob)
         self.ssl_supervise = False
-        num_patches = self.x_embedder.num_patches
+        self.num_patch_tokens = self.x_embedder.num_patches
         # Will use fixed sin-cos embedding:
         if self.use_pos_embed:
-            self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, hidden_size), requires_grad=False)
+            self.pos_embed = nn.Parameter(torch.zeros(1, self.num_patch_tokens, hidden_size), requires_grad=False)
 
         # use rotary position encoding, borrow from EVA
         if self.use_rope:
@@ -168,6 +170,25 @@ class LightningDiT(nn.Module):
         if self.num_register_tokens > 0:
             self.register_tokens = nn.Parameter(torch.randn(num_register_tokens, hidden_size))
 
+        if self.use_register_space:
+            self.register_encoder = LightningDiTBlock(
+                hidden_size, 
+                num_heads, 
+                mlp_ratio=mlp_ratio, 
+                use_qknorm=use_qknorm, 
+                use_swiglu=use_swiglu, 
+                use_rmsnorm=use_rmsnorm,
+                wo_shift=wo_shift,
+            )
+            self.register_decoder = LightningDiTBlock(
+                hidden_size, 
+                num_heads, 
+                mlp_ratio=mlp_ratio, 
+                use_qknorm=use_qknorm, 
+                use_swiglu=use_swiglu, 
+                use_rmsnorm=use_rmsnorm,
+                wo_shift=wo_shift,
+            )
         self.blocks = nn.ModuleList([
             LightningDiTBlock(
                 hidden_size, 
@@ -177,7 +198,6 @@ class LightningDiT(nn.Module):
                 use_swiglu=use_swiglu, 
                 use_rmsnorm=use_rmsnorm,
                 wo_shift=wo_shift,
-                num_register_tokens=num_register_tokens,
             ) for _ in range(depth)
         ])
         self.final_layer = LightningFinalLayer(hidden_size, patch_size, self.out_channels, use_rmsnorm=use_rmsnorm)
@@ -213,6 +233,11 @@ class LightningDiT(nn.Module):
         for block in self.blocks:
             nn.init.constant_(block.adaLN_modulation[-1].weight, 0)
             nn.init.constant_(block.adaLN_modulation[-1].bias, 0)
+        if self.use_register_space:
+            nn.init.constant_(self.register_encoder.adaLN_modulation[-1].weight, 0)
+            nn.init.constant_(self.register_encoder.adaLN_modulation[-1].bias, 0)
+            nn.init.constant_(self.register_decoder.adaLN_modulation[-1].weight, 0)
+            nn.init.constant_(self.register_decoder.adaLN_modulation[-1].bias, 0)
 
         # Zero-out output layers:
         nn.init.constant_(self.final_layer.adaLN_modulation[-1].weight, 0)
@@ -243,23 +268,28 @@ class LightningDiT(nn.Module):
         y: (N,) tensor of class labels
         use_checkpoint: boolean to toggle checkpointing
         """
-        x = self.x_embedder(x)
+        x_patch = self.x_embedder(x)
         if self.use_pos_embed:
-            x = x + self.pos_embed  # (N, T, D), where T = H * W / patch_size ** 2
-        if self.num_register_tokens > 0:
-            reg = self.register_tokens.unsqueeze(0).expand(x.shape[0], -1, -1)  # [B, R, D]
-            x = torch.cat([reg, x], dim=1)  # [B, R + T, D]
-        t = self.t_embedder(t)                   # (N, D)
-        y = self.y_embedder(y, self.training)    # (N, D)
-        c = t + y                                # (N, D)
+            x_patch = x_patch + self.pos_embed   # (B, P, D), where T = H * W / patch_size ** 2
+        t = self.t_embedder(t)                   # (B, D)
+        y = self.y_embedder(y, self.training)    # (B, D)
+        c = t + y                                # (B, D)
 
-        for block in self.blocks:
-            x = block(x, c, feat_rope=self.feat_rope)
-        
         if self.num_register_tokens > 0:
-            image_patches = self.final_layer(x[:, self.num_register_tokens:, :], c)
+            x_reg = repeat(self.register_tokens, "r d -> b r d", b=x.shape[0])  # [B, R, D]
+
+        if self.use_register_space:
+            x = self.register_encoder(x_reg, c, x_kv=x_patch, rope_q=None, rope_k=self.feat_rope)
+            for block in self.blocks:
+                x = block(x, c, rope_q=None, rope_k=None)
+            x = self.register_decoder(x_patch, c, x_kv=x, rope_q=self.feat_rope, rope_k=None)
         else:
-            image_patches = self.final_layer(x, c)
+            x = torch.cat([x_patch, x_reg], dim=1)
+            for block in self.blocks:
+                x = block(x, c, rope_q=self.feat_rope, rope_k=self.feat_rope, num_rope_tokens=self.num_patch_tokens)
+            x = x[:, :self.num_patch_tokens, :]
+        
+        image_patches = self.final_layer(x, c)
         image_out = self.unpatchify(image_patches)
 
         model_out = {'image': image_out}

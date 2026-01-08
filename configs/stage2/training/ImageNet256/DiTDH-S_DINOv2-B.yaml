@@ -76,5 +76,5 @@ training:
   beta: [0.9, 0.95]
   wd: 0.0
   schedule_type: 'constant'
-  warmup_steps: 0
+  warmup_epochs: 10
   clip_grad: 1.0

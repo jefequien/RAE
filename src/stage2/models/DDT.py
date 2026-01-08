@@ -373,9 +373,6 @@ class DiTwDDTHead(nn.Module):
         image_out = self.unpatchify(image_patches)
 
         model_out = {'image': image_out}
-        if self.num_register_tokens > 0:
-            model_out['register_tokens'] = x[:, :self.num_register_tokens, :]
-            model_out['register_logits'] = self.register_head(x[:, :self.num_register_tokens, :])
         return model_out
 
     def forward_with_cfg(self, x, t, y, cfg_scale, cfg_interval=(0, 1)):

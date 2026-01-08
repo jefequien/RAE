@@ -29,7 +29,7 @@ stage_2:
     use_rmsnorm: true
     wo_shift: false
     use_pos_embed: false
-  ckpt: 'models/DiTs/Dinov2/wReg_base/ImageNet256/DiT-M/0100000.pt'
+  ckpt: 'models/DiTs/Dinov2/wReg_base/ImageNet256/DiT-M/0100000_sparse4.pt'
 
 transport:
   params:

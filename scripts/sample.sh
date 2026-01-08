@@ -29,7 +29,7 @@ CONFIG_PATH=configs/${STAGE_NAME}/sampling/ImageNet256/${MODEL_NAME}_DINOv2-B.ya
 #  Local setup
 # -------------------------------
 export NNODES=1
-export GPUS_PER_NODE=4
+export GPUS_PER_NODE=2
 export WORLD_SIZE=$((NNODES * GPUS_PER_NODE))
 
 echo "================ LOCAL SETUP ================"
@@ -46,6 +46,6 @@ torchrun --standalone \
     --nproc_per_node=$GPUS_PER_NODE \
     src/sample_ddp.py \
     --config $CONFIG_PATH \
-    --sample-dir results/${STAGE_NAME}/samples/${MODEL_NAME} \
+    --sample-dir results/${STAGE_NAME}/samples/${MODEL_NAME}_sparse4 \
     --precision bf16 \
     --label-sampling equal

@@ -336,7 +336,6 @@ class NormAttention(nn.Module):
         norm_layer: nn.Module = nn.LayerNorm,
         fused_attn: bool = True,
         use_rmsnorm: bool = False,
-        num_register_tokens: int = 0,
     ) -> None:
         super().__init__()
         assert dim % num_heads == 0, 'dim should be divisible by num_heads'
@@ -345,36 +344,39 @@ class NormAttention(nn.Module):
         self.head_dim = dim // num_heads
         self.scale = self.head_dim ** -0.5
         self.fused_attn = fused_attn
-        self.num_register_tokens = num_register_tokens
         
         if use_rmsnorm:
             norm_layer = RMSNorm
             
-        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
+        self.q_linear = nn.Linear(dim, dim, bias=qkv_bias)
+        self.kv_linear = nn.Linear(dim, dim * 2, bias=qkv_bias)
         self.q_norm = norm_layer(self.head_dim) if qk_norm else nn.Identity()
         self.k_norm = norm_layer(self.head_dim) if qk_norm else nn.Identity()
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
         
-    def forward(self, x: torch.Tensor, rope=None) -> torch.Tensor:
-        B, N, C = x.shape
-        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
-        q, k, v = qkv.unbind(0)
-        q, k = self.q_norm(q), self.k_norm(k)
+    def forward(self, x: torch.Tensor, x_kv: torch.Tensor | None = None, rope_q=None, rope_k=None, num_rope_tokens=None) -> torch.Tensor:
+        if x_kv is None:
+            x_kv = x  # self-attention
+        B, Nq, C = x.shape
+        Nk = x_kv.shape[1]
+        q = self.q_linear(x).reshape(B, Nq, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
+        kv = self.kv_linear(x_kv).reshape(B, Nk, 2, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
+        k, v = kv.unbind(0)
+        q = self.q_norm(q)
+        k = self.k_norm(k)
         
-        if rope is not None:
-            R = self.num_register_tokens
-            if R > 0:
-                q_reg, q_tok = q[:, :, :R], q[:, :, R:]
-                k_reg, k_tok = k[:, :, :R], k[:, :, R:]
-                q_tok = rope(q_tok)
-                k_tok = rope(k_tok)
-                q = torch.cat([q_reg, q_tok], dim=2)
-                k = torch.cat([k_reg, k_tok], dim=2)
+        if rope_q is not None:
+            if num_rope_tokens is not None:
+                q[:, :, :num_rope_tokens] = rope_q(q[:, :, :num_rope_tokens])
             else:
-                q = rope(q)
-                k = rope(k)
+                q = rope_q(q)
+        if rope_k is not None:
+            if num_rope_tokens is not None:
+                k[:, :, :num_rope_tokens] = rope_k(k[:, :, :num_rope_tokens])
+            else:
+                k = rope_k(k)
 
         if self.fused_attn:
             q = q.to(v.dtype)
@@ -390,7 +392,7 @@ class NormAttention(nn.Module):
             attn = self.attn_drop(attn)
             x = attn @ v
 
-        x = x.transpose(1, 2).reshape(B, N, C)
+        x = x.transpose(1, 2).reshape(B, Nq, C)
         x = self.proj(x)
         x = self.proj_drop(x)
         return x
