@@ -7,8 +7,36 @@ from einops import repeat
 
 from .model_utils import VisionRotaryEmbeddingFast, SwiGLUFFN, RMSNorm, NormAttention, LabelEmbedder, get_2d_sincos_pos_embed, GaussianFourierEmbedding, modulate
 
+class PerceiverIOBlock(nn.Module):
+    """
+    Perceiver IO Block.
+    """
+    def __init__(
+        self,
+        register_block_depth=1,
+        register_encoder_depth=1,
+        register_decoder_depth=1,
+        **block_kwargs
+    ):
+        super().__init__()
+        self.register_blocks = nn.ModuleList([
+            LightningDiTBlock(**block_kwargs) for _ in range(register_block_depth)
+        ])
+        self.encoder_blocks = nn.ModuleList([
+            LightningDiTBlock(**block_kwargs) for _ in range(register_encoder_depth)
+        ])
+        self.decoder_blocks = nn.ModuleList([
+            LightningDiTBlock(**block_kwargs) for _ in range(register_decoder_depth)
+        ])
 
-
+    def forward(self, x_patch, x_reg, c, rope=None):
+        for block in self.encoder_blocks:
+            x_reg = block(x_reg, c, x_kv=x_patch, rope_q=None, rope_k=rope)
+        for block in self.register_blocks:
+            x_reg = block(x_reg, c, rope_q=None, rope_k=None)
+        for block in self.decoder_blocks:
+            x_patch = block(x_patch, c, x_kv=x_reg, rope_q=rope, rope_k=None)
+        return x_patch, x_reg
 
 class LightningDiTBlock(nn.Module):
     """
@@ -88,6 +116,7 @@ class LightningDiTBlock(nn.Module):
         x = x + gate_msa.unsqueeze(1) * self.attn(modulate(self.norm1(x), shift_msa, scale_msa), x_kv=x_kv, rope_q=rope_q, rope_k=rope_k, num_rope_tokens=num_rope_tokens)
         x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
         return x
+
 class LightningFinalLayer(nn.Module):
     """
     The final layer of LightningDiT.
@@ -122,6 +151,7 @@ class LightningDiT(nn.Module):
         in_channels=768,
         hidden_size=1152,
         depth=28,
+        register_block_depth=1,
         num_heads=16,
         mlp_ratio=4.0,
         num_register_tokens=0,
@@ -168,38 +198,33 @@ class LightningDiT(nn.Module):
             self.feat_rope = None
 
         if self.num_register_tokens > 0:
-            self.register_tokens = nn.Parameter(torch.randn(num_register_tokens, hidden_size))
+            self.register_tokens = nn.Parameter(torch.randn(num_register_tokens, hidden_size) * 0.02)
 
         if self.use_register_space:
-            self.register_encoder = LightningDiTBlock(
-                hidden_size, 
-                num_heads, 
-                mlp_ratio=mlp_ratio, 
-                use_qknorm=use_qknorm, 
-                use_swiglu=use_swiglu, 
-                use_rmsnorm=use_rmsnorm,
-                wo_shift=wo_shift,
-            )
-            self.register_decoder = LightningDiTBlock(
-                hidden_size, 
-                num_heads, 
-                mlp_ratio=mlp_ratio, 
-                use_qknorm=use_qknorm, 
-                use_swiglu=use_swiglu, 
-                use_rmsnorm=use_rmsnorm,
-                wo_shift=wo_shift,
-            )
-        self.blocks = nn.ModuleList([
-            LightningDiTBlock(
-                hidden_size, 
-                num_heads, 
-                mlp_ratio=mlp_ratio, 
-                use_qknorm=use_qknorm, 
-                use_swiglu=use_swiglu, 
-                use_rmsnorm=use_rmsnorm,
-                wo_shift=wo_shift,
-            ) for _ in range(depth)
-        ])
+            self.blocks = nn.ModuleList([
+                PerceiverIOBlock(
+                    register_block_depth=register_block_depth,
+                    hidden_size=hidden_size, 
+                    num_heads=num_heads, 
+                    mlp_ratio=mlp_ratio, 
+                    use_qknorm=use_qknorm, 
+                    use_swiglu=use_swiglu, 
+                    use_rmsnorm=use_rmsnorm,
+                    wo_shift=wo_shift,
+                ) for _ in range(depth)
+            ])
+        else:
+            self.blocks = nn.ModuleList([
+                LightningDiTBlock(
+                    hidden_size=hidden_size, 
+                    num_heads=num_heads, 
+                    mlp_ratio=mlp_ratio, 
+                    use_qknorm=use_qknorm, 
+                    use_swiglu=use_swiglu, 
+                    use_rmsnorm=use_rmsnorm,
+                    wo_shift=wo_shift,
+                ) for _ in range(depth)
+            ])
         self.final_layer = LightningFinalLayer(hidden_size, patch_size, self.out_channels, use_rmsnorm=use_rmsnorm)
         self.initialize_weights()
 
@@ -231,13 +256,19 @@ class LightningDiT(nn.Module):
 
         # Zero-out adaLN modulation layers in LightningDiT blocks:
         for block in self.blocks:
-            nn.init.constant_(block.adaLN_modulation[-1].weight, 0)
-            nn.init.constant_(block.adaLN_modulation[-1].bias, 0)
-        if self.use_register_space:
-            nn.init.constant_(self.register_encoder.adaLN_modulation[-1].weight, 0)
-            nn.init.constant_(self.register_encoder.adaLN_modulation[-1].bias, 0)
-            nn.init.constant_(self.register_decoder.adaLN_modulation[-1].weight, 0)
-            nn.init.constant_(self.register_decoder.adaLN_modulation[-1].bias, 0)
+            if self.use_register_space:
+                for sub_block in block.register_blocks:
+                    nn.init.constant_(sub_block.adaLN_modulation[-1].weight, 0)
+                    nn.init.constant_(sub_block.adaLN_modulation[-1].bias, 0)
+                for sub_block in block.encoder_blocks:
+                    nn.init.constant_(sub_block.adaLN_modulation[-1].weight, 0)
+                    nn.init.constant_(sub_block.adaLN_modulation[-1].bias, 0)
+                for sub_block in block.decoder_blocks:
+                    nn.init.constant_(sub_block.adaLN_modulation[-1].weight, 0)
+                    nn.init.constant_(sub_block.adaLN_modulation[-1].bias, 0)
+            else:
+                nn.init.constant_(block.adaLN_modulation[-1].weight, 0)
+                nn.init.constant_(block.adaLN_modulation[-1].bias, 0)
 
         # Zero-out output layers:
         nn.init.constant_(self.final_layer.adaLN_modulation[-1].weight, 0)
@@ -279,17 +310,15 @@ class LightningDiT(nn.Module):
             x_reg = repeat(self.register_tokens, "r d -> b r d", b=x.shape[0])  # [B, R, D]
 
         if self.use_register_space:
-            x = self.register_encoder(x_reg, c, x_kv=x_patch, rope_q=None, rope_k=self.feat_rope)
             for block in self.blocks:
-                x = block(x, c, rope_q=None, rope_k=None)
-            x = self.register_decoder(x_patch, c, x_kv=x, rope_q=self.feat_rope, rope_k=None)
+                x_patch, x_reg = block(x_patch, x_reg, c, rope=self.feat_rope)
         else:
-            x = torch.cat([x_patch, x_reg], dim=1)
+            x_concat = torch.cat([x_patch, x_reg], dim=1)
             for block in self.blocks:
-                x = block(x, c, rope_q=self.feat_rope, rope_k=self.feat_rope, num_rope_tokens=self.num_patch_tokens)
-            x = x[:, :self.num_patch_tokens, :]
+                x_concat = block(x_concat, c, rope_q=self.feat_rope, rope_k=self.feat_rope, num_rope_tokens=self.num_patch_tokens)
+            x_patch = x_concat[:, :self.num_patch_tokens, :]
         
-        image_patches = self.final_layer(x, c)
+        image_patches = self.final_layer(x_patch, c)
         image_out = self.unpatchify(image_patches)
 
         model_out = {'image': image_out}

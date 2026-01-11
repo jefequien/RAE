@@ -36,7 +36,7 @@ export PROJECT=imagerae_${STAGE_NAME}
 #  Local setup
 # -------------------------------
 export NNODES=1
-export GPUS_PER_NODE=4
+export GPUS_PER_NODE=2
 export WORLD_SIZE=$((NNODES * GPUS_PER_NODE))
 
 echo "================ LOCAL SETUP ================"
