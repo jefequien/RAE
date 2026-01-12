@@ -6,6 +6,7 @@ from torch import nn
 from einops import repeat
 
 from .model_utils import VisionRotaryEmbeddingFast, SwiGLUFFN, RMSNorm, NormAttention, LabelEmbedder, get_2d_sincos_pos_embed, GaussianFourierEmbedding, modulate
+from ..transport import path
 
 class PerceiverIOBlock(nn.Module):
     """
@@ -163,6 +164,7 @@ class LightningDiT(nn.Module):
         use_rmsnorm=True,
         wo_shift=False,
         use_pos_embed: bool = True,
+        use_x_pred: bool = False,
         use_register_space: bool = False,
     ):
         super().__init__()
@@ -173,6 +175,7 @@ class LightningDiT(nn.Module):
         self.use_rope = use_rope
         self.use_rmsnorm = use_rmsnorm
         self.use_pos_embed = use_pos_embed
+        self.use_x_pred = use_x_pred
         self.use_register_space = use_register_space
         self.depth = depth
         self.hidden_size = hidden_size
@@ -313,9 +316,9 @@ class LightningDiT(nn.Module):
         x_patch = self.x_embedder(x)
         if self.use_pos_embed:
             x_patch = x_patch + self.pos_embed   # (B, P, D), where T = H * W / patch_size ** 2
-        t = self.t_embedder(t)                   # (B, D)
-        y = self.y_embedder(y, self.training)    # (B, D)
-        c = t + y                                # (B, D)
+        t_emb = self.t_embedder(t)                   # (B, D)
+        y_emb = self.y_embedder(y, self.training)    # (B, D)
+        c = t_emb + y_emb                                # (B, D)
 
         if self.num_register_tokens > 0:
             # x_reg = repeat(self.register_tokens, "r d -> b r d", b=x.shape[0])  # [B, R, D]
@@ -336,10 +339,12 @@ class LightningDiT(nn.Module):
         image_patches = self.final_layer(x_patch, c)
         image_out = self.unpatchify(image_patches)
 
+        if self.use_x_pred:
+            image_out = (x - image_out) / path.expand_t_like_x(t.clip(0.05), x)
         model_out = {'image': image_out}
         return model_out
 
-    def forward_with_cfg(self, x, t, y, cfg_scale, cfg_interval=(-1e4, -1e4), interval_cfg: float = 0.0):
+    def forward_with_cfg(self, x, t, y, cfg_scale, cfg_interval=(0.0, 1.0)):
         """
         Forward pass of LightningDiT, but also batches the unconditional forward pass for classifier-free guidance.
         """
@@ -356,22 +361,33 @@ class LightningDiT(nn.Module):
         eps, rest = model_out[:, :self.in_channels], model_out[:, self.in_channels:]
         #eps, rest = model_out[:, :3], model_out[:, 3:]
         cond_eps, uncond_eps = torch.split(eps, len(eps) // 2, dim=0)
-        t = t[0] # check if t < cfg_interval
-        in_interval = False
-        for i in range(len(cfg_interval)):
-            if t >= cfg_interval[i][0] and t < cfg_interval[i][1]:
-                #print(f't:{t}, cfg_interval: {cfg_interval[i]}')
-                if interval_cfg > 1.0:
-                    half_eps = uncond_eps  + interval_cfg * (cond_eps - uncond_eps)
-                else:
-                    half_eps = cond_eps # only use conditional generation
-                in_interval = True
-                break
-        if not in_interval:
-            #print(f't:{t} not in cfg_interval')
-            half_eps = uncond_eps + cfg_scale * (cond_eps - uncond_eps)
+
+        # t = t[0] # check if t < cfg_interval
+        # in_interval = False
+        # for i in range(len(cfg_interval)):
+        #     if t >= cfg_interval[i][0] and t < cfg_interval[i][1]:
+        #         #print(f't:{t}, cfg_interval: {cfg_interval[i]}')
+        #         if interval_cfg > 1.0:
+        #             half_eps = uncond_eps  + interval_cfg * (cond_eps - uncond_eps)
+        #         else:
+        #             half_eps = cond_eps # only use conditional generation
+        #         in_interval = True
+        #         break
+        # if not in_interval:
+        #     #print(f't:{t} not in cfg_interval')
+        #     half_eps = uncond_eps + cfg_scale * (cond_eps - uncond_eps)
+        t_half = path.expand_t_like_x(t[: len(t) // 2], x)
+        low, high = cfg_interval
+        interval_mask = (t_half < high) & ((low == 0) | (t_half > low))
+        cfg_scale_interval = torch.where(interval_mask, cfg_scale, 1.0)
+        half_eps = uncond_eps + cfg_scale_interval * (cond_eps - uncond_eps)
+        
         eps = torch.cat([half_eps, half_eps], dim=0)
-        return torch.cat([eps, rest], dim=1)
+        image_out = torch.cat([eps, rest], dim=1)
+
+        model_out = {'image': image_out}
+        return model_out
+
     def forward_with_autoguidance(self, x, t, y, cfg_scale, additional_model_forward, cfg_interval=(-1e4, -1e4), interval_cfg: float = 0.0):
         """
         Forward pass of LightningDiT, but also contain the forward pass for the additional model

@@ -208,10 +208,10 @@ class Transport:
         if self.model_type == ModelType.VELOCITY:
             terms['loss_real'] = mean_flat(((model_output_real['image'] - ut) ** 2))
             terms['pred_real'] = xt - path.expand_t_like_x(t, xt) * model_output_real['image']
-        elif self.model_type == ModelType.DATA:
-            v_pred = (xt - model_output_real['image']) / path.expand_t_like_x(t.clip(0.05), xt)
-            terms['loss_real'] = mean_flat(((v_pred - ut) ** 2))
-            terms['pred_real'] = model_output_real['image']
+        # elif self.model_type == ModelType.DATA:
+        #     v_pred = (xt - model_output_real['image']) / path.expand_t_like_x(t.clip(0.05), xt)
+        #     terms['loss_real'] = mean_flat(((v_pred - ut) ** 2))
+        #     terms['pred_real'] = model_output_real['image']
         else: 
             _, drift_var = self.path_sampler.compute_drift(xt, t)
             sigma_t, _ = self.path_sampler.compute_sigma_t(path.expand_t_like_x(t, xt))
@@ -251,10 +251,11 @@ class Transport:
             model_output = model(x, t, **model_kwargs)['image']
             return model_output
         
-        def data_ode(x, t, model, **model_kwargs):
-            model_output = model(x, t, **model_kwargs)['image']
-            v_pred = (x - model_output) / path.expand_t_like_x(t.clip(0.05), x)
-            return v_pred
+        # def data_ode(x, t, model, **model_kwargs):
+        #     model_output = model(x, t, **model_kwargs)['image']
+        #     return model_output
+            # v_pred = (x - model_output) / path.expand_t_like_x(t.clip(0.05), x)
+            # return v_pred
 
         if self.model_type == ModelType.NOISE:
             drift_fn = noise_ode
@@ -262,8 +263,8 @@ class Transport:
             drift_fn = score_ode
         elif self.model_type == ModelType.VELOCITY:
             drift_fn = velocity_ode
-        elif self.model_type == ModelType.DATA:
-            drift_fn = data_ode
+        # elif self.model_type == ModelType.DATA:
+        #     drift_fn = data_ode
         else:
             raise NotImplementedError()
         
@@ -286,8 +287,8 @@ class Transport:
             score_fn = lambda x, t, model, **kwargs: model(x, t, **kwargs)['image']
         elif self.model_type == ModelType.VELOCITY:
             score_fn = lambda x, t, model, **kwargs: self.path_sampler.get_score_from_velocity(model(x, t, **kwargs)['image'], x, t)
-        elif self.model_type == ModelType.DATA:
-            score_fn = lambda x, t, model, **kwargs: self.path_sampler.get_score_from_data(model(x, t, **kwargs)['image'], x, t)
+        # elif self.model_type == ModelType.DATA:
+        #     score_fn = lambda x, t, model, **kwargs: self.path_sampler.get_score_from_data(model(x, t, **kwargs)['image'], x, t)
         else:
             raise NotImplementedError()
         

@@ -22,7 +22,7 @@ source $SCRATCH/miniforge3/bin/activate rae
 
 # Config
 STAGE_NAME="stage2"
-MODEL_NAME="DiT-B"
+MODEL_NAME="RDiT-B"
 IMAGE_SIZE=256
 CONFIG_PATH=configs/${STAGE_NAME}/sampling/ImageNet${IMAGE_SIZE}/${MODEL_NAME}_DINOv2-B.yaml
 

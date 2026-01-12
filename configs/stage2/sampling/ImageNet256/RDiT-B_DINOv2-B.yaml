@@ -50,9 +50,9 @@ sampler:
 
 guidance:
   method: 'cfg'
-  scale: 3.0
+  scale: 2.0
   t-min: 0.0
-  t-max: 1.0
+  t-max: 0.9
 
 misc:
   latent_size: [768, 16, 16] # [C, H, W]
