@@ -14,7 +14,7 @@ stage_1:
 stage_2:
   target: stage2.models.DDT.DiTwDDTHead
   params:
-    input_size: 16
+    input_size: 32
     patch_size: 1
     in_channels: 768
     hidden_size: [1152, 2048]

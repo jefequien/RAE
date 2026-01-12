@@ -29,13 +29,13 @@ class PerceiverIOBlock(nn.Module):
             LightningDiTBlock(**block_kwargs) for _ in range(register_decoder_depth)
         ])
 
-    def forward(self, x_patch, x_reg, c, rope=None):
+    def forward(self, x_patch, x_reg, c, rope_patch=None, rope_reg=None):
         for block in self.encoder_blocks:
-            x_reg = block(x_reg, c, x_kv=x_patch, rope_q=None, rope_k=rope)
+            x_reg = block(x_reg, c, x_kv=x_patch, rope_q=rope_reg, rope_k=rope_patch)
         for block in self.register_blocks:
-            x_reg = block(x_reg, c, rope_q=None, rope_k=None)
+            x_reg = block(x_reg, c, rope_q=rope_reg, rope_k=rope_reg)
         for block in self.decoder_blocks:
-            x_patch = block(x_patch, c, x_kv=x_reg, rope_q=rope, rope_k=None)
+            x_patch = block(x_patch, c, x_kv=x_reg, rope_q=rope_patch, rope_k=rope_reg)
         return x_patch, x_reg
 
 class LightningDiTBlock(nn.Module):
@@ -198,7 +198,12 @@ class LightningDiT(nn.Module):
             self.feat_rope = None
 
         if self.num_register_tokens > 0:
-            self.register_tokens = nn.Parameter(torch.randn(num_register_tokens, hidden_size) * 0.02)
+            # self.register_tokens = nn.Parameter(torch.randn(num_register_tokens, hidden_size) * 0.02)
+            self.register_embedder = PatchEmbed(input_size, patch_size * 2, in_channels, hidden_size, bias=True)
+            self.register_rope = VisionRotaryEmbeddingFast(
+                dim=hidden_size // num_heads // 2,
+                pt_seq_len=input_size // patch_size // 2,
+            )
 
         if self.use_register_space:
             self.blocks = nn.ModuleList([
@@ -246,6 +251,12 @@ class LightningDiT(nn.Module):
         w = self.x_embedder.proj.weight.data
         nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
         nn.init.constant_(self.x_embedder.proj.bias, 0)
+
+        # Initialize register embedder like nn.Linear (instead of nn.Conv2d):
+        if self.num_register_tokens > 0:
+            w = self.register_embedder.proj.weight.data
+            nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
+            nn.init.constant_(self.register_embedder.proj.bias, 0)
 
         # Initialize label embedding table:
         nn.init.normal_(self.y_embedder.embedding_table.weight, std=0.02)
@@ -307,17 +318,21 @@ class LightningDiT(nn.Module):
         c = t + y                                # (B, D)
 
         if self.num_register_tokens > 0:
-            x_reg = repeat(self.register_tokens, "r d -> b r d", b=x.shape[0])  # [B, R, D]
+            # x_reg = repeat(self.register_tokens, "r d -> b r d", b=x.shape[0])  # [B, R, D]
+            x_reg = self.register_embedder(x)
 
         if self.use_register_space:
             for block in self.blocks:
-                x_patch, x_reg = block(x_patch, x_reg, c, rope=self.feat_rope)
+                x_patch, x_reg = block(x_patch, x_reg, c, rope_patch=self.feat_rope, rope_reg=self.register_rope)
         else:
-            x_concat = torch.cat([x_patch, x_reg], dim=1)
-            for block in self.blocks:
-                x_concat = block(x_concat, c, rope_q=self.feat_rope, rope_k=self.feat_rope, num_rope_tokens=self.num_patch_tokens)
-            x_patch = x_concat[:, :self.num_patch_tokens, :]
-        
+            if self.num_register_tokens > 0:
+                x_concat = torch.cat([x_patch, x_reg], dim=1)
+                for block in self.blocks:
+                    x_concat = block(x_concat, c, rope_q=self.feat_rope, rope_k=self.feat_rope, num_rope_tokens=self.num_patch_tokens)
+                x_patch = x_concat[:, :self.num_patch_tokens, :]
+            else:
+                for block in self.blocks:
+                    x_patch = block(x_patch, c, rope_q=self.feat_rope, rope_k=self.feat_rope)
         image_patches = self.final_layer(x_patch, c)
         image_out = self.unpatchify(image_patches)
 
@@ -331,7 +346,7 @@ class LightningDiT(nn.Module):
         # https://github.com/openai/glide-text2im/blob/main/notebooks/text2im.ipynb
         half = x[: len(x) // 2]
         combined = torch.cat([half, half], dim=0)
-        model_out = self.forward(combined, t, y)
+        model_out = self.forward(combined, t, y)['image']
         if self.ssl_supervise:
             model_out = model_out[0] # take the output only
         # For exact reproducibility reasons, we apply classifier-free guidance on only
@@ -364,7 +379,7 @@ class LightningDiT(nn.Module):
         half = x[: len(x) // 2] # cut the x by half, autoguidance does not need repeated input
         t = t[: len(t) // 2]
         y = y[: len(y) // 2]
-        model_out = self.forward(half, t, y)
+        model_out = self.forward(half, t, y)['image']
         ag_model_out = additional_model_forward(half, t, y)
         eps = model_out[:, :self.in_channels]
         ag_eps = ag_model_out[:, :self.in_channels]

@@ -48,8 +48,10 @@ def log(stats, step=None):
         wandb.log({k: v for k, v in stats.items()}, step=step)
 
 
-def log_image(sample, step=None, name="samples", nrow=None):
+def log_image(sample, step=None, name="samples", nrow=None, max_log_images=None):
     if is_main_process():
+        if max_log_images is not None:
+            sample = sample[:max_log_images]
         sample = array2grid(sample, nrow=nrow)
         wandb.log({name: wandb.Image(sample), "train_step": step})
 

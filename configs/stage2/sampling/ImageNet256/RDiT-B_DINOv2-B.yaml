@@ -4,15 +4,12 @@ stage_1:
     encoder_cls: 'Dinov2withNorm'
     encoder_config_path: 'facebook/dinov2-with-registers-base'
     encoder_input_size: 224
-    encoder_params:
-      dinov2_path: 'facebook/dinov2-with-registers-base'
-      normalize: true
+    encoder_params: {'dinov2_path': 'facebook/dinov2-with-registers-base', 'normalize': True}
     decoder_config_path: 'configs/decoder/ViTXL'
     pretrained_decoder_path: 'models/decoders/dinov2/wReg_base/ViTXL_n08/model.pt'
-    noise_tau: 0.0
-    reshape_to_2d: true
+    noise_tau: 0.
+    reshape_to_2d: True
     normalization_stat_path: 'models/stats/dinov2/wReg_base/imagenet1k/stat.pt'
-
 stage_2:
   target: stage2.models.lightningDiT.LightningDiT
   params:
@@ -20,11 +17,11 @@ stage_2:
     patch_size: 1
     in_channels: 768
     hidden_size: 768
-    depth: 6 # 12
-    register_block_depth: 3
+    depth: 6
     num_heads: 12
     mlp_ratio: 4.0
-    num_register_tokens: 64 # 0
+    num_register_tokens: 64
+    register_block_depth: 3
     class_dropout_prob: 0.1
     num_classes: 1000
     use_qknorm: true
@@ -33,14 +30,13 @@ stage_2:
     use_rmsnorm: true
     wo_shift: false
     use_pos_embed: false
-    use_register_space: true # false
-
+    use_register_space: true
+  ckpt: 'models/DiTs/Dinov2/wReg_base/ImageNet256/RDiT-B/0200000.pt'
 
 transport:
   params:
     path_type: 'Linear'
     prediction: 'data'
-    loss_weight: null
     time_dist_type: 'uniform'
 
 sampler:
@@ -48,35 +44,18 @@ sampler:
   params:
     sampling_method: 'euler'
     num_steps: 50
-    atol: 1.0e-6
-    rtol: 1.0e-3
-    reverse: false
+    atol: 1e-6
+    rtol: 1e-3
+    reverse: False
 
 guidance:
   method: 'cfg'
-  scale: 1.0
-  t_min: 0.0
-  t_max: 1.0
+  scale: 3.0
+  t-min: 0.0
+  t-max: 1.0
 
 misc:
   latent_size: [768, 16, 16] # [C, H, W]
   num_classes: 1000
   time_dist_shift_dim: 196608 # 16*16*768
   time_dist_shift_base: 4096
-
-training:
-  global_seed: 0
-  epochs: 160
-  global_batch_size: 1024
-  micro_batch_size: 1 # change according to your GPU memory
-  ema_decays: [0.9996, 0.9998, 0.9999]
-  num_workers: 4
-  log_every: 100
-  ckpt_every: 5000
-  sample_every: 10000
-  base_lr: 0.0002
-  beta: [0.9, 0.95]
-  wd: 0.0
-  schedule_type: 'constant'
-  warmup_epochs: 5
-  clip_grad: 1.0

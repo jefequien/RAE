@@ -490,11 +490,13 @@ def main(args):
                         rae.decode(terms["xt_real"].to(torch.float32)), 
                         train_steps, 
                         name="samples/xt_real", 
+                        max_log_images=16,
                     )
                     wandb_utils.log_image(
                         rae.decode(terms['pred_real'].to(torch.float32)), 
                         train_steps, 
                         name="samples/pred_real", 
+                        max_log_images=16,
                     )
 
                 logger.info("Generating EMA samples...")
@@ -512,7 +514,12 @@ def main(args):
                     )
                     dist.all_gather_into_tensor(out_samples, samples)
                     if args.wandb:
-                        wandb_utils.log_image(out_samples[:micro_batch_size], train_steps, name="samples/prediction")
+                        wandb_utils.log_image(
+                            out_samples[:micro_batch_size], 
+                            train_steps, 
+                            name="samples/prediction",
+                            max_log_images=16,
+                        )
                 logger.info("Generating EMA samples done.")
 
         if accum_counter != 0:

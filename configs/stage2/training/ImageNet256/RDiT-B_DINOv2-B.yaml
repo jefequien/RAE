@@ -20,11 +20,11 @@ stage_2:
     patch_size: 1
     in_channels: 768
     hidden_size: 768
-    depth: 6 # 12
+    depth: 6
     register_block_depth: 3
     num_heads: 12
     mlp_ratio: 4.0
-    num_register_tokens: 64 # 0
+    num_register_tokens: 64
     class_dropout_prob: 0.1
     num_classes: 1000
     use_qknorm: true
@@ -33,7 +33,7 @@ stage_2:
     use_rmsnorm: true
     wo_shift: false
     use_pos_embed: false
-    use_register_space: true # false
+    use_register_space: true
 
 
 transport:
